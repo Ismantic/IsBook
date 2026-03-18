@@ -19,12 +19,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install mdBook
-        uses: peaceiris/actions-mdbook@v2
-        with:
-          mdbook-version: "latest"
+        run: cargo install mdbook --locked
 
       - name: Build
         run: mdbook build
