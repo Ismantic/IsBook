@@ -1,0 +1,15 @@
+[book]
+authors = ["ismantic-dev"]
+language = "zh-CN"
+src = "."
+title = "底层技术"
+description = ""
+
+[build]
+build-dir = "../book-new"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+mathjax-support = true
+no-section-label = true
