@@ -1,8 +1,14 @@
 # Summary
 
-- [底层实现：语言技术漫谈](README.md)
+- [底层实现](README.md)
 - [Unicode 与 UTF-8](unicode-and-utf8.md)
 - [正则表达式引擎](regex-engine-1.md)
+- [正则表达式引擎：高级篇](regex-engine-2.md)
+- [DoubleArray Trie](doublearray-trie.md)
+- [Critbit Trie](critbit-trie.md)
+- [Tokenizer：第一篇](tokenizer-1.md)
+- [Tokenizer：第二篇](tokenizer-2.md)
+
 
 <!--
 后续文章保持单层排列，例如：

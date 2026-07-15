@@ -2,8 +2,8 @@
 authors = ["ismantic-dev"]
 language = "zh-CN"
 src = "."
-title = "底层技术"
-description = ""
+title = "底层实现"
+description = "语言技术基础导论"
 
 [build]
 build-dir = "../book-new"
