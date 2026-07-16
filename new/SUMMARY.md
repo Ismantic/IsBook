@@ -10,6 +10,6 @@
 - [中文分词：高级篇](wapic.md)
 - [Tokenizer: SentencePiece](tokenizer-1.md)
 - [Tokenizer: BytePiece](tokenizer-2.md)
-- [番外篇：W2V 与 Kmeans](wavec.md)
-- [番外篇：Topic Model](semat.md)
+- [番外篇：W2V](wavec.md)
+- [番外篇：LDA](semat.md)
 
