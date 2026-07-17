@@ -1566,3 +1566,5 @@ Multiset：解决"多频繁"的问题
 **正确理解 BPE 合并**
 
 BPE 每次接收两个相邻 token `A B`，生成新 token `AB`。一次合并只改变被合并位置及其左右相邻对，这正是增量更新能够避免完整扫描的原因。
+
+TODO：要专门说下Pretokenize怎么搞，以及Multiset这套其实意义不大
