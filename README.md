@@ -4,11 +4,9 @@
 
 | 目录 | 书名 | 主题 |
 |---|---|---|
-| `Text/` | 底层实现：文本处理 | Unicode、正则、Trie、分词、Tokenizer 与语言模型文本处理 |
-| `Matx/` | 底层实现：编译器 | AST、Visitor、运行时对象、容器、函数与 FFI |
+| `Text/` | 底层实现：文本处理 | Unicode、正则、Trie、分词、Tokenizer |
 | `Zero/` | 底层实现：训练引擎 | 张量、自动微分、模型训练、GPU 与 GPT |
-
-旧版章节与站点结构保存在 `Legacy/`，仅供迁移和内容核对。
+| `Matx/` | 底层实现：编译器 | AST、Visitor、运行时对象、容器、函数与 FFI |
 
 ## 本地构建
 
@@ -16,8 +14,8 @@
 
 ```sh
 mdbook build Text
-mdbook build Matx
 mdbook build Zero
+mdbook build Matx
 ```
 
-构建结果依次写入 `book-text/`、`book-matx/` 和 `book-zero/`。开发时也可以运行 `mdbook serve Text`、`mdbook serve Matx` 或 `mdbook serve Zero` 预览单本书。
+构建结果依次写入 `book-text/`、`book-zero/` 和 `book-matx/`。开发时也可以运行 `mdbook serve Text`、`mdbook serve Zero` 或 `mdbook serve Matx` 预览单本书。
