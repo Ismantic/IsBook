@@ -1,29 +1,23 @@
-# 是语指北录
+# 底层实现
 
-这个仓库正在把一组分散的技术文档整理成一本以 NLP 为主线的 `mdBook` 书籍。
+本仓库包含三本彼此独立的 `mdBook`：
 
-当前目标：
+| 目录 | 书名 | 主题 |
+|---|---|---|
+| `Text/` | 底层实现：文本处理 | Unicode、正则、Trie、分词、Tokenizer 与语言模型文本处理 |
+| `Matx/` | 底层实现：编译器 | AST、Visitor、运行时对象、容器、函数与 FFI |
+| `Zero/` | 底层实现：训练引擎 | 张量、自动微分、模型训练、GPU 与 GPT |
 
-- 统一章节结构
-- 把项目文档改写成可连续阅读的章节
-- 通过 GitHub Pages 发布在线版本
+旧版章节与站点结构保存在 `Legacy/`，仅供迁移和内容核对。
 
-书的主结构位于：
+## 本地构建
 
-- `src/`：`mdBook` 正文
-- `book.toml`：书籍配置
-- `.github/workflows/deploy-book.yml`：GitHub Pages 发布流程
+在仓库根目录分别运行：
 
-当前章节规划：
+```sh
+mdbook build Text
+mdbook build Matx
+mdbook build Zero
+```
 
-1. `Unicode`
-2. `Regex`
-3. `Trie`
-4. `Cut`
-5. `Tokenizer`
-6. `CRF`
-7. `W2V`
-8. `LDA`
-9. `GPT`
-
-`10-Matx` 不再纳入这本书的主线，后续会单独整理成另一套更偏编译器/运行时系统的内容。
+构建结果依次写入 `book-text/`、`book-matx/` 和 `book-zero/`。开发时也可以运行 `mdbook serve Text`、`mdbook serve Matx` 或 `mdbook serve Zero` 预览单本书。

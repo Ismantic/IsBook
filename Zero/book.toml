@@ -2,11 +2,11 @@
 authors = ["ismantic-dev"]
 language = "zh-CN"
 src = "."
-title = "底层实现"
-description = "语言技术基础导论"
+title = "底层实现：训练引擎"
+description = "从张量、自动微分到模型训练与 GPU 执行的训练引擎实现"
 
 [build]
-build-dir = "../book-new"
+build-dir = "../book-zero"
 
 [output.html]
 default-theme = "light"

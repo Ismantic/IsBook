@@ -28,12 +28,12 @@ jobs:
         run: cargo install mdbook --locked
 
       - name: Build
-        run: mdbook build
+        run: mdbook build Text
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./book
+          path: ./book-text
 
   deploy:
     needs: build

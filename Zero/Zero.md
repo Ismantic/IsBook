@@ -501,8 +501,8 @@ void test_auto() {
 
 #### 前向传播过程
 
-1. `x * y`：创建一个新的shared_ptr<Tensor>，值为6，连接到x和y
-2. `(x * y) + x`：创建最终的shared_ptr<Tensor> z，值为9，连接到前面的结果和x
+1. `x * y`：创建一个新的 `shared_ptr<Tensor>`，值为 6，连接到 x 和 y
+2. `(x * y) + x`：创建最终的 `shared_ptr<Tensor>` z，值为 9，连接到前面的结果和 x
 
 计算图结构：
 ```

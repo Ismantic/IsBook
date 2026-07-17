@@ -58,7 +58,7 @@ protected:
 - **类型层次检查**: `IsFrom()` 检查继承关系
 - **访问者模式**: 支持 `VisitAttrs()` 进行对象遍历
 
-### object_p<T>
+### `object_p<T>`
 
 `object_p<T>` 提供自动引用计数和类型安全访问的智能指针模板。
 

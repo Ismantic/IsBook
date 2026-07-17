@@ -1,0 +1,15 @@
+[book]
+authors = ["ismantic-dev"]
+language = "zh-CN"
+src = "."
+title = "底层实现：文本处理"
+description = "面向语言模型的文本处理底层技术"
+
+[build]
+build-dir = "../book-text"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+mathjax-support = true
+no-section-label = true
