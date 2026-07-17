@@ -9,6 +9,7 @@ description = "面向语言模型的文本处理底层技术"
 build-dir = "../book-text"
 
 [output.html]
+site-url = "/text/"
 default-theme = "light"
 preferred-dark-theme = "navy"
 mathjax-support = true

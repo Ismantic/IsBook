@@ -9,6 +9,7 @@ description = "从 AST、Visitor 到运行时对象、容器与 FFI 的编译器
 build-dir = "../book-matx"
 
 [output.html]
+site-url = "/matx/"
 default-theme = "light"
 preferred-dark-theme = "navy"
 mathjax-support = true

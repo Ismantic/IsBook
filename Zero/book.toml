@@ -9,6 +9,7 @@ description = "从张量、自动微分到模型训练与 GPU 执行的训练引
 build-dir = "../book-zero"
 
 [output.html]
+site-url = "/zero/"
 default-theme = "light"
 preferred-dark-theme = "navy"
 mathjax-support = true
