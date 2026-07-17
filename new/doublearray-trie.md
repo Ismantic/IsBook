@@ -1,6 +1,6 @@
 # DoubleArray Trie
 
-## Introduction
+## 概述
 DoubleArrayTrie 是一种高校的字典树 (Trie) 压缩表示方法，通过巧妙的数组布局和状态转移机制，实现了空间高效且访问快速的字符串检索数据结构。其被广泛的应用了字符串的检索上，称之为自然语言处理领域最核心的数据结构也不为过。
 
 以存储单词 {"he", "she", "his"} 为例，朴素指针字典树结构如下：
@@ -177,7 +177,7 @@ sh节点state: 124 ^ 40 = 84
 
 其实到这里，已经基本上能把DoubleArray创建的方法说的差不多了，就是不断的找到GetFreeIndex,分配给子节点，再对子节点迭代下去，直到把Trie树遍历完。
 
-## Implementation
+## 实现
 
 DoubleArrayTrie的核心实现思路：
 
