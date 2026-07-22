@@ -1,1570 +1,471 @@
 # Tokenizer：SentencePiece
 
-## 基础原理
+Tokenizer 不只是一个 BPE 合并算法。从原始文本到 token id，中间还要经过规范化、预切分、词表训练和推理编码。PieceTokenizer 中的 `sentencepiece` 方法将这条流程分成四个阶段：
 
-BPE (Byte Pair Encoding) 是一种数据压缩算法，最初用于文本压缩，后来被NLP领域广泛采用作为子词(Subword)分词方法。它的核心思想是**通过迭代地合并最频繁出现的字符对来构建词表**。
-
-**基本思路**
-
-1. 初始化词表：确定基础字符集合
-2. 迭代地找出最频繁的相邻词对
-3. 把词对合并成新的符号（新词）
-4. 重复此过程直到达到预订的词汇表大小
-
-**具体示例**
-
-**步骤1：初始化词汇表**
-```
-原始文本：["hello", "world", "hell", "low"]
-初始词汇表：{h, e, l, o, w, r, d}
-初始表示：["h e l l o", "w o r l d", "h e l l", "l o w"]
+```text
+原始文本
+  ↓ Normalize
+规范化文本
+  ↓ PreTokenize
+预切分片段
+  ↓ Counter
+SentencePiece 模型
+  ↓ Tokenizer
+token pieces / token ids
 ```
 
-**步骤2：统计相邻字符对频率**
-```
-字符对频率统计：
-(h,e): 2次  (出现在"hello"和"hell"中)
-(e,l): 2次  (出现在"hello"和"hell"中)
-(l,l): 2次  (出现在"hello"和"hell"中)
-(l,o): 2次  (出现在"hello"和"low"中)
-(w,o): 1次
-(o,r): 1次
-(r,l): 1次
-(l,d): 1次
-(o,w): 1次
-```
+训练和推理必须遵守同一套文本处理规则。否则即使词表相同，相同文本也可能产生不同的 token 序列。
 
-**步骤3：合并最频繁的词对**
+## Normalize
 
-此时有多组字符对并列第一。BPE 必须规定稳定的平局规则，例如选择最先出现的 `(h,e)`，将其合并为新符号 `he`：
+Unicode 中可能存在外观相同、编码不同的字符。例如全角字母、兼容字符和组合字符如果不先统一，会被训练器当成不同符号，浪费词表空间。
 
-```
-更新后词汇表：{h, e, l, o, w, r, d, he}
-更新后表示：["he l l o", "w o r l d", "he l l", "l o w"]
+`Normalizer` 使用预编译的 Unicode 映射表完成 NFKC 等规范化。映射表被编码为 Double-Array Trie，处理文本时对当前位置执行最长前缀匹配：
+
+```text
+输入字节
+  ↓ Trie 最长匹配
+找到规则 ──→ 输出规范化结果
+未找到   ──→ 保留当前 UTF-8 码点
+非法字节 ──→ U+FFFD
 ```
 
-**步骤4：重新统计并继续合并**
+空格也在这一阶段处理。默认情况下，连续空格会被合并，开头和结尾的空格被移除，其余空格替换成可见符号 `▁`：
 
-```
-新的字符对频率：
-(he,l): 2次
-(l,l): 2次
-(l,o): 2次
-(w,o): 1次
-(o,r): 1次
-(r,l): 1次
-(l,d): 1次
-(o,w): 1次
+```text
+"  Hello   world  "
+        ↓
+"Hello▁world"
 ```
 
-继续按照相同的平局规则选择 `(he,l)`，合并为 `hel`：
+这样空格就能像普通字符一样进入词表，同时仍可在解码时恢复。启用 `reconstruct` 后，Normalizer 会保留全部空格，不再执行合并和裁剪。
 
-```
-词汇表：{h, e, l, o, w, r, d, he, hel}
-表示：["hel l o", "w o r l d", "hel l", "l o w"]
-```
+规范化规则、空格符号和 `reconstruct` 配置保存在 `PreTokenizerSpec` 中，并随模型一起保存。
 
-**步骤5：重复直到达到目标词汇表大小**
+## PreTokenize
 
-继续这个过程，可能得到：
-```
-最终词汇表：{h, e, l, o, w, r, d, he, hel, hell, ...}
-```
+PreTokenizer 在 BPE 训练之前确定基本边界。PieceTokenizer 将它分成三个维度：
 
-## 朴素 BPE
+| 维度 | 配置 | 作用 |
+| --- | --- | --- |
+| Split | `word` / `isolate` | 决定空格、标点和英文缩写怎样切分 |
+| Digit | `keep` / `split` | 数字串整体保留或逐码点拆开 |
+| Cn | none / char / dict | 连续汉字不切、逐字切或按词典切 |
 
-**朴素Python实现**
+例如：
 
-```python
-from collections import Counter
+```text
+输入：Hello, world 你好123
 
-def BPE(texts, num_merges):
-    # 将每个字符串转换为字符序列
-    corpus = [' '.join(list(text)) for text in texts]
+word + keep + none
+→ Hello | , | ▁world | ▁ | 你好 | 123
 
-    for i in range(num_merges):
-        # 统计所有相邻字符对的频率
-        pairs = Counter()
-        for text in corpus:
-            tokens = text.split()
-            for j in range(len(tokens)-1):
-                pairs[(tokens[j], tokens[j+1])] += 1
-
-        if not pairs:
-            break
-
-        # 选择最频繁的字符对
-        best_pair = pairs.most_common(1)[0][0]
-        new_token = best_pair[0] + best_pair[1]
-
-        # 在所有文本中替换该字符对
-        corpus = [text.replace(
-            f"{best_pair[0]} {best_pair[1]}", new_token)
-                  for text in corpus]
-
-        print(f"Iter {i+1}: Merge {best_pair} -> {new_token}")
-        print(f"{corpus}\n")
-
-    return corpus
-
-# 测试
-texts = ["hello", "world", "hell", "low"]
-result = BPE(texts, 3)
+isolate + split + char
+→ Hello | , | ▁ | world | ▁ | 你 | 好 | 1 | 2 | 3
 ```
 
-**运行结果**：
-```
-Iter 1: Merge ('h', 'e') -> he
-['he l l o', 'w o r l d', 'he l l', 'l o w']
+这些边界非常重要。Counter 只在单个预切分片段内部学习 BPE，不会把两个片段直接合并成一个 piece。
 
-Iter 2: Merge ('he', 'l') -> hel
-['hel l o', 'w o r l d', 'hel l', 'l o w']
+中文词典模式同样发生在这里。`CnCutter` 将词典构造成 Double-Array Trie，并把词频转换成对数概率。切分时，它从每个 UTF-8 码点边界查询所有词典前缀，将候选词看成一条从起点到终点的边：
 
-Iter 3: Merge ('hel', 'l') -> hell
-['hell o', 'w o r l d', 'hell', 'l o w']
-```
+```text
+南京市
 
-**性能瓶颈分析**
-
-通过分析上述BPE实现，可以清楚地看到性能问题：
-
-**主要瓶颈**
-
-1. **重复统计**：每次合并后都要重新扫描整个语料统计词对频率
-2. **字符串操作**：大量的字符串查找、替换操作效率低下
-3. **内存开销**：频繁的字符串创建和销毁
-
-**时间复杂度分析**
-
-朴素实现的时间复杂度约为 **O(MN)**，其中：
-- N：文本总长度
-- M：合并次数
-
-**具体分析**：
-- 每轮统计相邻对并替换语料，都需要扫描当前 token 序列：O(N)
-- 最多进行 M 轮合并，因此总复杂度约为 O(MN)
-
-当处理大规模语料时，这种每轮完整扫描的方式代价很高。
-
-**关键问题**
-
-```python
-# 每次都要重新统计 - 大量重复计算
-for text in corpus:
-    tokens = text.split()
-    for j in range(len(tokens)-1):
-        pairs[(tokens[j], tokens[j+1])] += 1
-
-# 字符串替换 - 效率低下
-corpus = [text.replace(f"{best_pair[0]} {best_pair[1]}", new_token)
-          for text in corpus]
+0 ──南──> 3 ──京──> 6 ──市──> 9
+└────南京────> 6
+└──────南京市──────> 9
 ```
 
-**优化目标**：我们需要一种方法能够：
-1. **增量更新**：只更新受影响的频率统计，而不是重新计算全部
-2. **快速定位**：迅速找到所有需要合并的位置
-3. **高效合并**：避免字符串操作，直接在数据结构上操作
-
-## 增量 BPE
-
-为了解决朴素实现的性能问题，我们设计了两个专门的数据结构：
-
-- **Multiset**：解决频率统计问题（延迟更新 + 堆维护）
-- **IndexedList**：解决位置定位问题（相邻对索引 + 链表操作）
-
-这两个数据结构避免了每轮重新扫描全部语料。实际复杂度取决于合并位置总数、索引维护和堆调整次数，不能简单写成 O(N)。
-
-## Multiset
-
-**设计动机**
-
-传统方法每次合并后都要重新统计所有频率，但实际上：
-- 大部分字符对的频率没有变化
-- 只有涉及被合并字符对的相邻位置需要更新
-- 可以通过增量更新避免重复计算
-
-想象一下BPE训练时的常见场景：
-```cpp
-// 合并 (a,b) -> c 时，需要做大量统计更新
-stats.Remove({prev, a});   // 移除旧的相邻对
-stats.Remove({a, b});      // 移除被合并的对
-stats.Remove({b, next});   // 移除旧的相邻对
-stats.Insert({prev, c});   // 添加新的相邻对
-stats.Insert({c, next});   // 添加新的相邻对
-```
-
-如果每个操作都立即执行堆调整，性能会很糟糕。
-
-**核心设计思想：延迟更新 + 堆维护**
+Viterbi 动态规划为每个字节位置保存当前最高分及其前驱位置，最后从文本末尾沿前驱回溯，得到总分最高的切分路径。词典没有覆盖的位置会加入单个 Unicode 码点的 fallback 边，因此生僻字也不会使路径中断。
 
 ```cpp
-template<typename T>
-class Multiset {
-private:
-    std::vector<Node*> vec_;                    // 最大堆数组
-    std::unordered_map<T, Node*> map_;          // 元素到节点的映射
-    std::unordered_map<T, int> to_insert_;     // 待插入的元素
-    std::unordered_map<T, int> to_remove_;     // 待删除的元素
+for (const auto& match : GetMatches(han_run)) {
+    int start = match.end - match.length + 1;
+    int end = match.end + 1;
+    float_t score = scores[start] + match.weight;
+    if (score > scores[end]) {
+        scores[end] = score;
+        routes[end] = start;
+    }
+}
+```
+
+中文切词完成后，每个词再独立交给 BPE 学习词内的子词：
+
+```text
+南京市长江大桥
+  ↓ 中文切词
+南京市 | 长江大桥
+  ↓ BPE
+南京 | 市 | 长江 | 大桥
+```
+
+这样可以减少 BPE 仅凭局部共现频率学出跨词片段。这里的中文切词器是 PreTokenizer 内部的独立组件，不依赖后面的 BytePiece 或 SentencePiece 算法。`dict=no` 表示逐字模式；CLI 训练时还会将它组合成 `isolate + digit split`，使中文、数字和标点保持细粒度。
+
+Split、Digit 等配置保存在模型中。外部词典内容不会写进模型，因此词典模式下的训练和推理必须使用同一份词典。
+
+实现上，这三个维度最终收束到同一个入口：
+
+```cpp
+std::vector<std::string> PreTokenizer::Split(
+    std::string_view normalized) const {
+    return ustr::SplitTextCn(
+        normalized, space_, cn_cut_fn_, cut_, split_digits_);
+}
+
+std::vector<std::string> PreTokenizer::PreTokenize(
+    std::string_view text) const {
+    return Split(normalizer_.Normalize(text));
+}
+```
+
+`cn_cut_fn_` 为空时，`SplitTextCn` 仍会执行普通切分和数字拆分；配置中文模式时，它再对连续汉字调用逐字或词典切分。Counter 与 Tokenizer 都调用 `PreTokenize`，从代码层面保证边界一致。
+
+## Counter
+
+`SentencePieceCounter` 负责从预切分语料学习 BPE 词表。它首先加入几类基础 piece：
+
+- `<unk>`、`<s>`、`</s>` 等控制符号；
+- 256 个 byte piece，覆盖所有可能的字节；
+- 由 `character_coverage` 选出的必备字符。
+
+**字符覆盖率**
+
+Counter 先统计所有预切分片段及其频率，再按片段频率加权统计字符。例如 `low` 出现 5 次，其中的 `l`、`o`、`w` 都贡献 5 次。
+
+字符按照频率从高到低加入必备字符集合，直到累计频率达到 `character_coverage`。覆盖率之外的稀有字符在训练语料中暂时替换成内部未知字符，避免大量罕见字符占满词表。
+
+字符覆盖率解决的是“哪些字符值得作为普通 piece 保留”，byte fallback 解决的是“未保留的字符如何编码”。两者并不冲突：常见字符使用普通词表，罕见字符仍可退回 UTF-8 字节。
+
+**初始化 Symbol**
+
+BPE 从单个 Unicode 码点开始：
+
+```text
+片段：lowest
+初始：l | o | w | e | s | t
+```
+
+每个 `Symbol` 可以表示一个字符，也可以表示左右两个 Symbol 合并后的结果。它还记录频率以及该相邻对在语料中的位置：
+
+```cpp
+struct Symbol {
+    const Symbol* left;
+    const Symbol* right;
+    UnicodeText chars;
+    size_t byte_size;
+    uint64_t fp;
+    uint64_t freq;
+    std::vector<uint64_t> positions;
 };
 ```
 
-**关键设计理念**：
-- **延迟更新**：批量操作先缓存在`to_insert_`和`to_remove_`中
-- **按需提交**：只在查询时才真正执行堆操作
-- **双重索引**：数组实现堆，哈希表实现快速查找
+字符 Symbol 会被缓存，同一个字符不需要重复创建对象。两个相邻 Symbol 也通过 fingerprint 缓存成同一个候选 Symbol，`positions` 则记录这个 pair 出现在哪个片段、哪两个位置。
 
-**Node节点设计**
+位置本身不保存完整对象，而是压缩成一个 `uint64_t`：
 
-```cpp
-class Node {
-public:
-    int count;    // 元素计数
-    T value;      // 元素值
-    int pos;      // 在堆数组中的位置
-
-    bool operator<(const Node& o) const {
-        if (GetCount() != o.GetCount()) {
-            return GetCount() < o.GetCount();
-        }
-        return o.value < value;  // 频率相同时采用稳定的pair顺序
-    }
-};
+```text
+高 32 位：片段编号 sid
+中 16 位：左 Symbol 位置
+低 16 位：右 Symbol 位置
 ```
 
-**设计要点**：
-- `pos`字段：支持O(1)定位节点在堆中的位置
-- 比较操作：实现最大堆语义
-- 计数缓存：避免重复计算
+语料中相同 pair 的所有位置因此可以集中到同一个候选上。计算频率时，再把对应片段的出现次数累加起来。
 
-**延迟更新机制**
+**选择并合并 pair**
 
-```cpp
-void Insert(const T& item, int count = 1) {
-    to_insert_[item] += count;  // 仅仅记录，不立即执行
-}
+考虑经过预切分后的简单语料：
 
-void Remove(const T& item, int count = 1) {
-    to_remove_[item] += count;  // 仅仅记录，不立即执行
-}
+```text
+low     5 次
+lowest  2 次
+newer   3 次
 ```
 
-**优势分析**：
-- **批量优化**：多次操作同一元素时合并计算
-- **性能提升**：避免频繁的堆调整操作
-- **事务性**：所有操作在`_Commit()`时一次性生效
+初始 pair 频率包括：
 
-**核心机制：_Commit()函数详解**
-
-`_Commit()`函数是Multiset的核心，它负责将所有缓存的操作一次性提交到堆中：
-
-```cpp
-void _Commit() {
-    // 先处理所有插入操作
-    for (const auto& pair : to_insert_) {
-        _Insert(pair.first, pair.second);
-    }
-
-    // 再处理所有删除操作
-    for (const auto& pair : to_remove_) {
-        _Remove(pair.first, pair.second);
-    }
-
-    // 清空缓存
-    to_insert_.clear();
-    to_remove_.clear();
-}
+```text
+l+o = 7
+o+w = 7
+w+e = 5
+n+e = 3
+e+w = 3
 ```
 
-**为什么先插入后删除？**
+频率相同时，Counter 再按照长度和字符串顺序得到确定结果。假设首先选择 `l+o`：
 
-这个顺序很重要！考虑以下场景：
-```cpp
-multiset.Insert("apple", 5);
-multiset.Remove("apple", 3);
+```text
+l | o | w       → lo | w
+l | o | w | ... → lo | w | ...
 ```
 
-如果先删除后插入，可能会出现删除不存在元素的情况。先插入确保元素存在后再删除。
+下一轮会出现新的候选 `lo+w`，频率为 7：
 
-**_Commit()的触发时机**：
-
-```cpp
-T Top() {
-    _Commit();  // 查询前先提交
-    return vec_.empty() ? T() : vec_[0]->value;
-}
-
-int GetCount(const T& item) {
-    _Commit();  // 查询前先提交
-    auto it = map_.find(item);
-    return it == map_.end() ? 0 : it->second->count;
-}
+```text
+lo | w → low
 ```
 
-所有查询操作都会自动触发`_Commit()`，确保数据的一致性。
+训练循环就是不断重复“选择最高频 pair、合并全部有效位置、加入新邻居”，直到达到目标词表大小。
 
-**完整工作示例**：
+**局部更新**
 
-```cpp
-Multiset<std::pair<int,int>> stats;
+一次合并只会改变它附近的 pair：
 
-// 阶段1：只记录，不执行
-stats.Insert({1,2}, 3);
-stats.Insert({3,4}, 2);
-stats.Remove({1,2}, 1);
-stats.Insert({1,2}, 2);
-
-// 此时内部状态：
-// vec_: []  (堆还是空的)
-// to_insert_: {{1,2}: 5, {3,4}: 2}  (3+2=5)
-// to_remove_: {{1,2}: 1}
-
-// 阶段2：触发_Commit()
-auto top = stats.Top();
-
-// _Commit()执行过程：
-// 1. _Insert({1,2}, 5) -> 堆中添加节点{1,2}:5
-// 2. _Insert({3,4}, 2) -> 堆中添加节点{3,4}:2
-// 3. _Remove({1,2}, 1) -> {1,2}计数变为4
-// 4. 清空缓存
-
-// 最终堆状态：
-// vec_[0]: {1,2}:4  (最大值)
-// vec_[1]: {3,4}:2
+```text
+l | o | w | e | s | t
+    ↓ 合并 l+o
+lo | w | e | s | t
+      ↓ 更新相邻候选
+lo+w
 ```
 
-**堆维护算法详解**
+右侧位置被置空，只有新 Symbol 左右两侧的候选需要重新加入。其他位置没有变化，不需要重新扫描。
 
-**向上调整（_ItemIncrease）**：
-
-当元素计数增加时，需要向上调整以维持最大堆性质：
+旧候选的 `positions` 中可能仍然保存已经失效的位置。Counter 不会在每次合并后到所有候选中删除它们，而是在 `ComputeFreq` 时检查左右位置是否仍然指向原 Symbol，只累加有效位置，并顺便压缩位置列表。这是一种延迟清理策略。
 
 ```cpp
-void _ItemIncrease(int pos) {
-    Node* node = vec_[pos];
+void ComputeFreq(Symbol* symbol) {
+    if (symbol->freq > 0) return;
 
-    // 向上冒泡直到满足最大堆性质
-    while (pos > 0) {
-        int uppos = (pos - 1) >> 1;  // 父节点位置
-        Node* up = vec_[uppos];
-
-        if (*up < *node) {           // 父节点更小，违反最大堆性质
-            vec_[pos] = up;          // 父节点下移
-            up->pos = pos;           // 更新父节点的位置信息
-            pos = uppos;             // 当前节点上移
-        } else {
-            break;  // 堆性质已满足
+    size_t write = 0;
+    for (uint64_t encoded : symbol->positions) {
+        Position pos = DecodePos(encoded);
+        if (symbol->left == symbols_[pos.sid][pos.left] &&
+            symbol->right == symbols_[pos.sid][pos.right]) {
+            symbol->freq += freqs_[pos.sid];
+            symbol->positions[write++] = encoded;
         }
     }
-
-    // 将节点安放到最终位置
-    vec_[pos] = node;
-    node->pos = pos;
+    symbol->positions.resize(write);
 }
 ```
 
-**向下调整（_ItemDecrease）**：
+这里的 `freqs_[pos.sid]` 是预切分片段在语料中的出现次数。一个位置有效时累加的不是 `1`，而是该片段的完整权重。
 
-当元素计数减少时，需要向下调整：
+选出最高频 pair 后，真正修改语料表示的代码只处理命中的位置及其两个邻居：
 
 ```cpp
-void _ItemDecrease(int pos) {
-    int endpos = vec_.size();
-    Node* node = vec_[pos];
-    int downpos = 2 * pos + 1;  // 左子节点位置
+for (uint64_t encoded : best_symbol->positions) {
+    Position pos = DecodePos(encoded);
+    if (symbols_[pos.sid][pos.left] == nullptr) continue;
 
-    // 向下筛选
-    while (downpos < endpos) {
-        int rightpos = downpos + 1;
+    int prev = GetPrevIndex(pos.sid, pos.left);
+    int next = GetNextIndex(pos.sid, pos.right);
 
-        // 选择计数较大的子节点
-        if (rightpos < endpos && !(*vec_[rightpos] < *vec_[downpos])) {
-            downpos = rightpos;
-        }
+    ResetFreq(pos.sid, prev, pos.left, best_symbol);
+    ResetFreq(pos.sid, pos.right, next, best_symbol);
 
-        Node* downnode = vec_[downpos];
-        if (*node < *downnode) {     // 子节点更大，需要交换
-            vec_[pos] = downnode;
-            downnode->pos = pos;
-            pos = downpos;
-            downpos = 2 * pos + 1;
-        } else {
-            break;  // 堆性质已满足
-        }
-    }
+    symbols_[pos.sid][pos.left] = best_symbol;
+    symbols_[pos.sid][pos.right] = nullptr;
 
-    vec_[pos] = node;
-    node->pos = pos;
+    AddNewPair(pos.sid, prev, pos.left);
+    AddNewPair(pos.sid, pos.left, next);
 }
 ```
 
+右位置被置为 `nullptr`，左位置指向合并后的 Symbol。旧邻居候选的频率被标记为待重算，新产生的两个相邻 pair 则加入候选集合；整轮没有重新遍历语料。
 
-**高级功能：TopK查询**
+**控制候选规模**
 
-除了基本的频率统计，Multiset还支持高效的TopK查询，这在某些BPE变体中很有用：
+候选集合也不会始终保存所有 pair。Counter 定期计算候选频率，只保留较高频的一部分作为 active symbols；每隔一段合并再刷新一次。这使大规模语料上的训练仍能控制时间和内存。
+
+pair 的长度还受 `max_piece_size` 限制，避免重复标点或噪声文本产生异常长的 piece。
+
+**生成模型**
+
+每次选中的 piece 按学习顺序获得分数：
+
+```text
+第 1 个合并：score =  0
+第 2 个合并：score = -1
+第 3 个合并：score = -2
+```
+
+这里的 score 不是 piece 出现的概率，而是推理时重放 BPE 的优先级。越早学到的合并分数越高。
 
 ```cpp
-std::vector<std::pair<T, int>> TopK(int k) {
-    _Commit();  // 确保数据是最新的
+pieces_.emplace_back(
+    best_symbol->ToString(),
+    -static_cast<float>(pieces_.size()));
+```
 
-    if (vec_.empty()) return {};
+这行代码把训练顺序直接编码进模型。推理器不需要保存独立的 merge 表，只要读取 piece 的 score 就能恢复相同顺序。
 
-    // 使用最小堆来维护TopK候选
-    using HeapItem = std::tuple<int, T, int, int>;  // -count, value, count, pos
-    std::priority_queue<HeapItem, std::vector<HeapItem>, std::greater<HeapItem>> heap;
+达到目标词表大小后，Counter 补入必备字符，并保存：
 
-    // 从根节点开始
-    heap.push(std::make_tuple(-vec_[0]->GetCount(),
-                              vec_[0]->value,
-                              vec_[0]->count,
-                              vec_[0]->pos));
+```text
+CounterSpec
+PreTokenizerSpec
+Pieces: piece / score / type
+```
 
-    std::vector<std::pair<T, int>> result;
+模型采用可读文本格式。训练配置、预切分配置、普通 piece、byte piece 和控制 token 因而可以一起加载。
 
-    for (int i = 0; i < k && !heap.empty(); ++i) {
-        auto [_key, val, count, pos] = heap.top();
-        heap.pop();
-        result.emplace_back(val, count);
+## Tokenizer
 
-        // 将子节点加入堆中进行下一轮比较
-        for (int child_pos : {pos * 2 + 1, pos * 2 + 2}) {
-            if (child_pos < vec_.size()) {
-                heap.push(std::make_tuple(
-                    -vec_[child_pos]->GetCount(),
-                     vec_[child_pos]->value,
-                     vec_[child_pos]->count,
-                     child_pos
-                ));
-            }
-        }
+`SentencePieceTokenizer` 读取模型后，建立 `piece → id` 哈希表。编码时先按照模型中的配置执行 Normalize 和 PreTokenize，再分别编码每个预切分片段。因此，普通切分、数字拆分和中文切分产生的边界都不会被 BPE 跨越，训练与推理遵守同一套文本处理规则。
+
+```cpp
+EncodeResult SentencePieceTokenizer::Encode(
+    std::string_view text) const {
+    EncodeResult result;
+    for (const auto& piece : pretokenizer_.PreTokenize(text)) {
+        auto sub = EncodeSegment(piece);
+        result.insert(result.end(),
+                      std::make_move_iterator(sub.begin()),
+                      std::make_move_iterator(sub.end()));
     }
     return result;
 }
 ```
 
-**为什么不能直接取堆数组的前K个元素？**
+`EncodeSegment` 一次只接收一个预切分片段，所以后面的 BPE 合并天然无法跨越片段边界。
 
-这是一个常见的误解。让我们用具体例子说明：
+**为什么不能只做最长匹配**
 
-```
-最大堆结构：
-           100
-          /    \
-        80      90
-       /  \    /  \
-     75   70  85   60
+BPE 词表不仅记录有哪些字符串，还隐含了它们的学习顺序。假设词表同时存在 `ab`、`bc` 和 `abc`，`abc` 必须先由 `a+b` 或 `b+c` 形成，才能继续参与下一次合并。直接从左到右选择最长字符串，可能得到与训练过程不同的结果。
 
-数组存储：[100, 80, 90, 75, 70, 85, 60]
-如果直接取前3个：[100, 80, 90]
-但实际Top3应该是：[100, 90, 85]
+SentencePieceTokenizer 因而从单个 Unicode 码点开始，按照模型 score 重放 BPE，而不是直接使用 Trie 最长匹配。
 
-问题：第3大的元素85在数组的第6位！
+**初始化候选队列**
+
+单个片段先被表示成 Symbol 数组，并通过 `prev`、`next` 索引模拟双向链表：
+
+```text
+l ⇄ o ⇄ w ⇄ e ⇄ s ⇄ t
 ```
 
-**TopK算法的核心思想**：
+Tokenizer 检查每一对相邻 Symbol。如果拼接结果存在于词表，就将它放入优先队列：
 
-1. **懒惰遍历**：不遍历整个堆，只访问可能包含TopK的节点
-2. **辅助最小堆**：维护候选节点，确保按大小顺序输出
-3. **逐层扩展**：每取出一个最大值，就将其子节点加入候选集
-
-**算法步骤详解**：
-
-```
-初始状态：candidates = [100]
-
-第1轮：
-- 取出100（最大值）
-- 加入100的子节点：candidates = [80, 90]
-- 结果：[100]
-
-第2轮：
-- 取出90（当前最大值）
-- 加入90的子节点：candidates = [80, 85, 60]
-- 结果：[100, 90]
-
-第3轮：
-- 取出85（当前最大值）
-- 85是叶子节点，无子节点
-- 结果：[100, 90, 85]
+```text
+l | o | w | e | s | t
+└ l+o → lo，score=0
+    └ o+w → ow，score=-3
 ```
 
-这种方法的时间复杂度是O(K log K)，远优于排序整个堆的O(N log N)。
+优先队列先弹出 score 较高的 `lo`，将 `l` 和 `o` 合并：
 
-**关键点**：每次交换都要更新节点的`pos`字段，这样才能保持位置信息的准确性。
+```text
+lo ⇄ w ⇄ e ⇄ s ⇄ t
+```
 
-**智能缓存合并示例**
+此时只需检查 `lo` 的左右邻居。如果 `low` 也在词表中，就把 `lo+w` 加入队列。其他位置的相邻关系没有改变。
+
+候选只在拼接结果已经存在于模型时入队：
 
 ```cpp
-// 这些操作会被智能合并：
-Insert("apple");
-Insert("apple");
-Remove("apple");
-Insert("apple");
+auto MaybeAddPair = [&](int left, int right) {
+    if (left == -1 || right == -1) return;
 
-// 最终效果等同于：
-Insert("apple", 2);  // 3次插入 - 1次删除 = 净增加2
-```
+    std::string_view piece(
+        symbols[left].piece.data(),
+        symbols[left].piece.size() + symbols[right].piece.size());
+    auto it = pieces_.find(piece);
+    if (it == pieces_.end()) return;
 
-**延迟批处理的性能优势**
-
-```
-普通方案：
-Insert("a") -> 立即堆操作 O(log n)
-Insert("a") -> 立即堆操作 O(log n)
-Insert("a") -> 立即堆操作 O(log n)
-总计：3 * O(log n)
-
-Multiset方案：
-Insert("a") -> 只记录 O(1)
-Insert("a") -> 只记录 O(1)
-Insert("a") -> 只记录 O(1)
-Top() -> 一次性处理：Insert("a", 3) -> O(log n)
-总计：O(log n)
-```
-
-**完整实现**
-
-```cpp
-template<typename T>
-class Multiset {
-public:
-    Multiset() = default;
-    Multiset(const Multiset&) = delete;
-    Multiset& operator=(const Multiset&) = delete;
-
-    Multiset(Multiset&& other) noexcept {
-        Swap(other);
-    }
-
-    Multiset& operator=(Multiset&& other) noexcept {
-        if (this != &other) {
-            Clear();
-            Swap(other);
-        }
-        return *this;
-    }
-
-    ~Multiset() {
-        Clear();
-    }
-
-    void Insert(const T& item, int count = 1) {
-        to_insert_[item] += count;
-    }
-
-    void Remove(const T& item, int count = 1) {
-        to_remove_[item] += count;
-    }
-
-    int GetCount(const T& item) {
-        _Commit();
-        auto it = map_.find(item);
-        return it == map_.end() ? 0 : it->second->count;
-    }
-
-    T Top() {
-        _Commit();
-        return vec_.empty() ? T() : vec_[0]->value;
-    }
-
-    explicit operator bool() const {
-        const_cast<Multiset*>(this)->_Commit();
-        return !vec_.empty();
-    }
-
-private:
-    class Node {
-    public:
-        int count;
-        T value;
-        int pos;
-
-        Node(int count, const T& value, int pos)
-            : count(count), value(value), pos(pos) {}
-
-        int GetCount() const { return count; }
-
-        bool operator<(const Node& o) const {
-            if (GetCount() != o.GetCount()) {
-                return GetCount() < o.GetCount();
-            }
-            // 频率相同时让较小的pair优先，保证训练结果可复现
-            return o.value < value;
-        }
-    };
-
-    std::vector<Node*> vec_;
-    std::unordered_map<T, Node*> map_;
-    std::unordered_map<T, int> to_insert_;
-    std::unordered_map<T, int> to_remove_;
-
-    void _Insert(const T& item, int count = 1) {
-        auto it = map_.find(item);
-        if (it == map_.end()) {
-            Node* node = new Node(0, item, vec_.size());
-            map_[item] = node;
-            vec_.push_back(node);
-            it = map_.find(item);
-        }
-        it->second->count += count;
-        _ItemIncrease(it->second->pos);
-    }
-
-    void _Remove(const T& item, int count = 1) {
-        auto it = map_.find(item);
-        if (it == map_.end()) return;
-
-        Node* node = it->second;
-        if (node->count <= count) {
-            _Erase(node->pos);
-            return;
-        }
-
-        node->count -= count;
-        _ItemDecrease(node->pos);
-    }
-
-    void _Commit() {
-        for (const auto& pair : to_insert_) {
-            _Insert(pair.first, pair.second);
-        }
-        for (const auto& pair : to_remove_) {
-            _Remove(pair.first, pair.second);
-        }
-        to_insert_.clear();
-        to_remove_.clear();
-    }
-
-    void _ItemIncrease(int pos) {
-        Node* node = vec_[pos];
-        while (pos > 0) {
-            int uppos = (pos - 1) >> 1;
-            Node* up = vec_[uppos];
-            if (*up < *node) {
-                vec_[pos] = up;
-                up->pos = pos;
-                pos = uppos;
-                continue;
-            }
-            break;
-        }
-        vec_[pos] = node;
-        node->pos = pos;
-    }
-
-    void _ItemDecrease(int pos) {
-        int endpos = vec_.size();
-        Node* node = vec_[pos];
-        int downpos = 2*pos + 1;
-        while (downpos < endpos) {
-            int rightpos = downpos + 1;
-            if (rightpos < endpos && !(*vec_[rightpos] < *vec_[downpos])) {
-                downpos = rightpos;
-            }
-            Node* downnode = vec_[downpos];
-            if (*node < *downnode) {
-                vec_[pos] = downnode;
-                downnode->pos = pos;
-                pos = downpos;
-                downpos = 2*pos + 1;
-            } else {
-                break;
-            }
-        }
-        vec_[pos] = node;
-        node->pos = pos;
-    }
-
-    void _Erase(int pos) {
-        Node* removed = vec_[pos];
-        Node* tail = vec_.back();
-        vec_.pop_back();
-        map_.erase(removed->value);
-
-        if (pos < static_cast<int>(vec_.size())) {
-            vec_[pos] = tail;
-            tail->pos = pos;
-
-            if (pos > 0 && *vec_[(pos - 1) >> 1] < *tail) {
-                _ItemIncrease(pos);
-            } else {
-                _ItemDecrease(pos);
-            }
-        }
-        delete removed;
-    }
-
-    void Clear() {
-        for (Node* node : vec_) delete node;
-        vec_.clear();
-        map_.clear();
-        to_insert_.clear();
-        to_remove_.clear();
-    }
-
-    void Swap(Multiset& other) noexcept {
-        vec_.swap(other.vec_);
-        map_.swap(other.map_);
-        to_insert_.swap(other.to_insert_);
-        to_remove_.swap(other.to_remove_);
-    }
+    SymbolPair* pair = symbol_pair_allocator.Allocate();
+    pair->left = left;
+    pair->right = right;
+    pair->score = model_->GetPieces(it->second).GetScore();
+    pair->size = piece.size();
+    agenda.push(pair);
 };
 ```
 
-Multiset本质上是一个支持重复元素的优先队列，通过延迟更新机制大大提升了BPE训练中的频率统计效率。
+`SymbolPair` 由对象池统一分配，避免大量候选反复申请小块内存。
 
-## IndexedList
+**失效候选**
 
-**设计动机**
+合并 `l+o` 后，队列里原来的 `o+w` 已经失效，因为 `o` 已被合并。为了避免在优先队列中间执行昂贵的删除，Tokenizer 允许旧候选暂时保留，等它被弹出时再检查：
 
-BPE合并操作需要：
-1. **快速定位**：找到所有文本中(a,b)出现的位置
-2. **高效合并**：将相邻的a和b合并成新的token c
-3. **动态更新**：合并后需要更新相邻对的统计信息
-4. **批量操作**：一次合并可能影响成千上万个位置
+- 左右 Symbol 是否已经被消费；
+- 两个 Symbol 的总长度是否仍与候选一致。
 
-传统方法需要扫描整个文本查找位置，而IndexedList通过维护"相邻对→位置"的索引以平均 O(1) 完成索引查找。
-
-**核心思想：相邻对索引**
+无效候选直接丢弃，有效候选才执行合并。这与 Counter 的延迟位置清理采用了相同思路：先保留可能过期的信息，使用时再验证。
 
 ```cpp
-template<typename T>
-class IndexedList {
-    Node* start_;                    // 链表头
-    std::unordered_map<
-        std::pair<T, T>,
-        std::vector<Node*>,
-        PairHash
-    > index_;                        // 相邻对 -> 节点位置的映射
-};
-```
-
-**关键洞察**：维护一个从"相邻对"到"该对在链表中所有出现位置"的索引！
-
-**节点设计**
-
-```cpp
-class Node {
-public:
-    T value;        // token值
-    Node* prev;     // 前驱节点
-    Node* next;     // 后继节点
-
-    void Delete() {
-        if (prev) prev->next = next;
-        if (next) next->prev = prev;
-        next = prev = nullptr;
-    }
-};
-```
-
-**索引设计**
-
-```cpp
-std::unordered_map<std::pair<T, T>, std::vector<Node*>, PairHash> index_;
-
-// 例如：index_[{2, 3}] = [node_ptr1, node_ptr2, node_ptr3, ...]
-// 表示相邻对(2,3)在链表中出现的所有位置
-```
-
-**注意**：索引指向的是相邻对中**第一个**token所在的节点！
-
-**完整示例：构建过程**
-
-假设我们要表示文本"hello"，对应token序列：[8, 5, 12, 12, 15]
-
-```cpp
-// 1. 构建链表
-IndexedList<int> list({8, 5, 12, 12, 15});
-
-// 2. 链表结构
-start_ -> [8] <-> [5] <-> [12] <-> [12] <-> [15]
-          n1     n2      n3       n4      n5
-
-// 3. 构建相邻对索引
-index_[{8, 5}]   = [n1]     // (8,5)在n1位置出现
-index_[{5, 12}]  = [n2]     // (5,12)在n2位置出现
-index_[{12, 12}] = [n3]     // (12,12)在n3位置出现
-index_[{12, 15}] = [n4]     // (12,15)在n4位置出现
-```
-
-**索引构建过程**
-
-```cpp
-template<typename Iterator>
-IndexedList(Iterator begin, Iterator end) {
-    if (begin == end) {
-        start_ = nullptr;
-        return;
-    }
-
-    // 创建第一个节点
-    auto it = begin;
-    T a = *it;
-    start_ = new Node(a, nullptr, nullptr);
-    Node* prev_node = start_;
-
-    // 创建后续节点并建立索引
-    ++it;
-    while (it != end) {
-        T b = *it;
-        Node* node = new Node(b, prev_node, nullptr);
-        prev_node->next = node;
-
-        // 关键：为相邻对(a,b)建立索引
-        InsertToIndex(std::make_pair(a, b), prev_node);
-
-        a = b;                    // 滚动窗口
-        prev_node = node;
-        ++it;
-    }
-}
-```
-
-**快速查询操作**
-
-```cpp
-// 快速找到所有(12,12)出现的位置
-auto nodes = list.GetIndex({12, 12});
-// 返回：[n3]，表示在n3位置有(12,12)对
-```
-
-**核心机制：RemoveIndex()函数详解**
-
-`RemoveIndex()`函数负责从索引中移除指定节点涉及的所有相邻对，这是合并操作的关键步骤：
-
-```cpp
-void RemoveIndex(Node* node) {
-    // 1. 移除涉及当前节点作为后一个元素的相邻对
-    if (node->prev) {
-        auto pair = std::make_pair(node->prev->value, node->value);
-        auto it = index_.find(pair);
-        if (it != index_.end()) {
-            auto& nodes = it->second;
-            // 从向量中移除对应的节点指针
-            nodes.erase(
-                std::remove(nodes.begin(), nodes.end(), node->prev),
-                nodes.end()
-            );
-            if (nodes.empty()) {
-                index_.erase(it);  // 如果没有更多出现，删除整个条目
-            }
-        }
-    }
-
-    // 2. 移除涉及当前节点作为前一个元素的相邻对
-    if (node->next) {
-        auto pair = std::make_pair(node->value, node->next->value);
-        auto it = index_.find(pair);
-        if (it != index_.end()) {
-            auto& nodes = it->second;
-            nodes.erase(
-                std::remove(nodes.begin(), nodes.end(), node),
-                nodes.end()
-            );
-            if (nodes.empty()) {
-                index_.erase(it);
-            }
-        }
-    }
-}
-```
-
-**关键理解**：每个节点参与两个相邻对
-- 作为**后一个元素**：`(prev->value, node->value)`，索引指向`prev`节点
-- 作为**前一个元素**：`(node->value, next->value)`，索引指向`node`节点
-
-**详细示例**：
-
-```
-链表状态：
-... [10] <-> [12] <-> [15] <-> [8] ...
-     n1      n2       n3      n4
-
-索引状态：
-index_[{10,12}] = [n1]  // n2作为后元素，索引指向n1
-index_[{12,15}] = [n2]  // n3作为后元素，索引指向n2
-index_[{15,8}]  = [n3]  // n4作为后元素，索引指向n3
-
-执行 RemoveIndex(n2)：
-1. 移除 index_[{10,12}] 中的 n1 指针
-2. 移除 index_[{12,15}] 中的 n2 指针
-
-执行 RemoveIndex(n3)：
-1. 移除 index_[{12,15}] 中的 n2 指针 (可能已移除)
-2. 移除 index_[{15,8}] 中的 n3 指针
-```
-
-**核心机制：UpdateIndex()函数详解**
-
-`UpdateIndex()`函数在节点合并后重新建立索引，确保新的相邻对能被正确索引：
-
-```cpp
-void UpdateIndex(Node* node) {
-    // 1. 为左侧相邻对建立新索引
-    if (node->prev) {
-        InsertToIndex(
-            std::make_pair(node->prev->value, node->value),
-            node->prev  // 注意：索引指向相邻对的第一个节点
-        );
-    }
-
-    // 2. 为右侧相邻对建立新索引
-    if (node->next) {
-        InsertToIndex(
-            std::make_pair(node->value, node->next->value),
-            node        // 注意：索引指向相邻对的第一个节点
-        );
-    }
-}
-```
-
-**索引指向规则**：对于相邻对`(a,b)`，索引始终指向值为`a`的节点（第一个节点）。
-
-**完整合并示例**：
-
-```
-初始状态：
-[5] <-> [12] <-> [12] <-> [15]
- n1      n2       n3      n4
-
-索引：
-index_[{5,12}]  = [n1]  // 指向第一个12的前一个节点
-index_[{12,12}] = [n2]  // 指向第一个12
-index_[{12,15}] = [n3]  // 指向第二个12
-
-合并(12,12) -> 24的过程：
-
-步骤1：RemoveIndex(n2)
-- 移除 index_[{5,12}] 中的 n1
-- 移除 index_[{12,12}] 中的 n2
-
-步骤2：RemoveIndex(n3)
-- 移除 index_[{12,12}] 中的 n2 (已移除)
-- 移除 index_[{12,15}] 中的 n3
-
-步骤3：物理合并
-n2->value = 24;  // 第一个12变成24
-删除 n3;         // 删除第二个12
-
-步骤4：UpdateIndex(n2)
-- 添加 index_[{5,24}] = [n1]   // 新的左侧相邻对
-- 添加 index_[{24,15}] = [n2]  // 新的右侧相邻对
-
-最终状态：
-[5] <-> [24] <-> [15]
- n1      n2      n4
-
-索引：
-index_[{5,24}]  = [n1]
-index_[{24,15}] = [n2]
-```
-
-**索引维护的核心原则**
-
-1. **一致性**：索引必须与链表状态保持同步
-2. **完整性**：每个相邻对都要有对应的索引条目
-3. **准确性**：索引指向的节点必须是相邻对的第一个节点
-4. **及时性**：链表变化后立即更新索引
-
-这种精确的索引维护机制使得IndexedList能够以平均 O(1) 找到候选集合；处理其中 r 个位置仍需 O(r)，这是整个BPE优化的关键所在。
-
-**完整实现**
-
-```cpp
-template<typename T>
-class IndexedList {
-public:
-    class Node {
-    public:
-        T value;
-        Node* prev;
-        Node* next;
-
-        Node(const T& value, Node* prev, Node* next)
-            : value(value), prev(prev), next(next) {}
-
-        void Delete() {
-            if (prev) prev->next = next;
-            if (next) next->prev = prev;
-            next = prev = nullptr;
-        }
-    };
-
-    struct PairHash {
-        template <class T1, class T2>
-        std::size_t operator() (const std::pair<T1,T2>& p) const {
-            auto s1 = std::hash<T1>{}(p.first);
-            auto s2 = std::hash<T2>{}(p.second);
-            return s1 ^ (s2 + 0x9e3779b9 + (s1 << 6) + (s1 >> 2));
-        }
-    };
-
-private:
-    Node* start_;
-    std::unordered_map<std::pair<T, T>, std::vector<Node*>, PairHash> index_;
-
-public:
-    IndexedList(const IndexedList&) = delete;
-    IndexedList& operator=(const IndexedList&) = delete;
-
-    IndexedList(IndexedList&& other) noexcept
-        : start_(std::exchange(other.start_, nullptr)),
-          index_(std::move(other.index_)) {}
-
-    IndexedList& operator=(IndexedList&& other) noexcept {
-        if (this != &other) {
-            Clear();
-            start_ = std::exchange(other.start_, nullptr);
-            index_ = std::move(other.index_);
-        }
-        return *this;
-    }
-
-    ~IndexedList() {
-        Clear();
-    }
-
-    template<typename Iterator>
-    IndexedList(Iterator begin, Iterator end) {
-        if (begin == end) {
-            start_ = nullptr;
-            return;
-        }
-
-        auto it = begin;
-        T a = *it;
-        start_ = new Node(a, nullptr, nullptr);
-        Node* prev_node = start_;
-
-        ++it;
-        while (it != end) {
-            T b = *it;
-            Node* node = new Node(b, prev_node, nullptr);
-            prev_node->next = node;
-            InsertToIndex(std::make_pair(a, b), prev_node);
-            a = b;
-            prev_node = node;
-            ++it;
-        }
-    }
-
-    std::vector<Node*> GetIndex(const std::pair<T,T>& pair) const {
-        auto it = index_.find(pair);
-        return it == index_.end() ? std::vector<Node*>{} : it->second;
-    }
-
-    Node* PopIndex(const std::pair<T,T>& pair) {
-        auto it = index_.find(pair);
-        if (it == index_.end() || it->second.empty()) return nullptr;
-
-        Node* node = it->second.back();
-        it->second.pop_back();
-        if (it->second.empty()) index_.erase(it);
-        return node;
-    }
-
-    void InsertToIndex(const std::pair<T, T>& pair, Node* node) {
-        index_[pair].push_back(node);
-    }
-
-    void RemoveIndex(Node* node) {
-        if (node->prev) {
-            auto pair = std::make_pair(node->prev->value, node->value);
-            auto it = index_.find(pair);
-            if (it != index_.end()) {
-                auto& nodes = it->second;
-                nodes.erase(
-                    std::remove(nodes.begin(), nodes.end(), node->prev),
-                    nodes.end()
-                );
-                if (nodes.empty()) {
-                    index_.erase(it);
-                }
-            }
-        }
-
-        if (node->next) {
-            auto pair = std::make_pair(node->value, node->next->value);
-            auto it = index_.find(pair);
-            if (it != index_.end()) {
-                auto& nodes = it->second;
-                nodes.erase(
-                    std::remove(nodes.begin(), nodes.end(), node),
-                    nodes.end()
-                );
-                if (nodes.empty()) {
-                    index_.erase(it);
-                }
-            }
-        }
-    }
-
-    void UpdateIndex(Node* node) {
-        if (node->prev) {
-            InsertToIndex(std::make_pair(node->prev->value, node->value), node->prev);
-        }
-        if (node->next) {
-            InsertToIndex(std::make_pair(node->value, node->next->value), node);
-        }
-    }
-
-    void Clear() {
-        while (start_ != nullptr) {
-            Node* next = start_->next;
-            delete start_;
-            start_ = next;
-        }
-        index_.clear();
-    }
-};
-```
-
-IndexedList本质上是一个带索引的双向链表，专门为高效支持BPE的合并操作而设计。
-
-## BPE 训练
-
-有了Multiset和IndexedList这两个数据结构，我们可以实现高效的BPE训练算法。
-
-**InitPairStats函数：初始化统计**
-
-```cpp
-static Multiset<std::pair<int,int>> InitPairsStats(
-        const std::vector<std::string>& texts) {
-    Multiset<std::pair<int,int>> stats;
-    std::vector<int> bytes;
-
-    for (const auto& text : texts) {
-        bytes.clear();
-        // 将字符转换为int（因为整个词表使用int）
-        for (uint8_t c : text) {
-            bytes.push_back(static_cast<int>(c));
-        }
-
-        // 统计相邻字符对
-        for (size_t i = 0; i < bytes.size()-1; i++) {
-            stats.Insert({bytes[i], bytes[i+1]});
-        }
-    }
-    return stats;
-}
-```
-
-**作用**：
-- 将文本转换为int序列（统一词表表示）
-- 使用Multiset统计所有相邻token对的频率
-- 返回初始的频率统计结果
-
-**BuildIndexedList函数：构建索引链表**
-
-```cpp
-static IndexedList<int> BuildIndexedList(const std::string& text) {
-    std::vector<int> bytes;
-    for (unsigned char c : text) {
-        bytes.push_back(static_cast<int>(c));
-    }
-    return IndexedList<int>(bytes.begin(), bytes.end());
-}
-```
-
-**作用**：
-- 将单个文本转换为int序列
-- 构建IndexedList，建立相邻对到位置的索引
-- 为每个文本建立独立的索引链表
-
-**BPE训练主循环**
-
-```cpp
-// 核心训练过程
-auto stats = InitPairsStats(texts);
-std::vector<IndexedList<int>> indexed_lists;
-indexed_lists.reserve(texts.size());
-
-// 为每个文本构建IndexedList
-for (const auto& text : texts) {
-    indexed_lists.push_back(BuildIndexedList(text));
-}
-
-int num_merges = vocab_size_ - meta_pieces_.size();
-int cnt = 0;
-
-// 初始化基础词汇表（256个字节）
-for (int i = 0; i < 256; i++) {
-    std::string t(1, i);
-    vocab_[i] = t;
-    cnt += 1;
-}
-
-// 主训练循环
-while (cnt < num_merges && stats) {
-    // 1. 找到最频繁的token对
-    auto top = stats.Top();
-    int n = stats.GetCount(top);
-    if (n < min_pair_count_) break;
-
-    // 2. 创建新的token
-    int new_id = vocab_.size();
-    merge_tree_.emplace_back(top, new_id);
-    vocab_[new_id] = vocab_[top.first] + vocab_[top.second];
-
-    // 3. 在所有文本中执行合并
-    for (auto& list : indexed_lists) {
-        Merge(top, new_id, list, &stats);
-    }
-
-    cnt += 1;
-}
-```
-
-**关键步骤**：
-1. **频率查询**：通过`stats.Top()`获取最频繁的token对
-2. **词汇扩展**：创建新token并更新词汇表
-3. **批量合并**：在所有文本的IndexedList中执行合并
-4. **统计更新**：Merge函数自动维护频率统计
-
-**Merge函数详解**
-
-Merge函数是整个BPE实现的核心，它巧妙地结合了IndexedList和Multiset的优势。
-
-```cpp
-static void Merge(const std::pair<int, int>& pair, int new_id,
-                 IndexedList<int>& indexed_list,
-                 Multiset<std::pair<int, int>>* stats = nullptr) {
-
-    // 每次弹出一个候选，避免遍历期间修改同一个vector
-    while (auto* node = indexed_list.PopIndex(pair)) {
-        // 第3步：验证节点有效性
-        if (node->value != pair.first ||
-            node->next == nullptr ||
-            node->next->value != pair.second) {
-            continue;  // 跳过无效或已处理的节点
-        }
-
-        // 第4步：更新索引（移除旧的相邻对）
-        indexed_list.RemoveIndex(node);
-        indexed_list.RemoveIndex(node->next);
-
-        // 第5步：更新统计信息（如果提供了stats）
-        if (stats != nullptr) {
-            // 减少当前被合并对的计数
-            stats->Remove(pair);
-
-            // 更新右侧相邻对的统计
-            if (node->next->next != nullptr) {
-                stats->Remove({node->next->value, node->next->next->value});
-                stats->Insert({new_id, node->next->next->value});
-            }
-
-            // 更新左侧相邻对的统计
-            if (node->prev != nullptr) {
-                stats->Remove({node->prev->value, pair.first});
-                stats->Insert({node->prev->value, new_id});
-            }
-        }
-
-        // 第6步：执行物理合并
-        auto* remove = node->next;
-        node->next->Delete();  // 从链表中删除节点
-        delete remove;         // 释放内存
-        node->value = new_id;  // 更新当前节点的值
-
-        // 第7步：重建索引（添加新的相邻对）
-        indexed_list.UpdateIndex(node);
-    }
-}
-```
-
-**Merge函数详细步骤解析**
-
-**步骤1：快速定位**
-
-```cpp
-auto* node = indexed_list.PopIndex(pair);
-```
-
-**关键理解**：这是整个函数效率的核心！
-
-通过IndexedList的索引机制，我们可以以平均 O(1) 完成索引查找，再用 O(r) 处理 r 个候选位置，而不需要扫描整个文本。
-
-```cpp
-// 传统方法：O(N)扫描
-for (int i = 0; i < text.size()-1; i++) {
-    if (text[i] == pair.first && text[i+1] == pair.second) {
-        // 找到一个位置
-    }
-}
-
-// IndexedList方法：平均 O(1) 查找索引，O(r) 处理候选
-auto nodes = indexed_list.GetIndex({12, 15});
-// 返回：[node_ptr1, node_ptr2, ...]，指向所有(12,15)对的第一个token位置
-```
-
-**步骤2-3：遍历与验证**
-
-```cpp
-while (auto* node = indexed_list.PopIndex(pair)) {
-    if (node->value != pair.first ||
-        node->next == nullptr ||
-        node->next->value != pair.second) {
+while (!agenda.empty()) {
+    SymbolPair* top = agenda.top();
+    agenda.pop();
+
+    if (symbols[top->left].piece.empty() ||
+        symbols[top->right].piece.empty() ||
+        symbols[top->left].piece.size() +
+            symbols[top->right].piece.size() != top->size) {
         continue;
     }
-    // ...
-}
-```
 
-**为什么需要验证？**
-
-1. **重叠匹配**：同一轮较早的合并可能已经改变相邻位置
-2. **边界情况**：节点可能已被删除或修改
-3. **数据一致性**：确保索引和实际链表状态一致
-
-这里不能取得 `vector<Node*>` 的引用后再用范围循环遍历，因为 `RemoveIndex()` 会修改同一个索引容器。`PopIndex()` 每次先弹出一个候选，再执行合并，因此不会使正在使用的迭代器失效；对 `(a,a)` 这类重叠匹配，受前一次合并影响的候选也会在验证阶段被跳过。
-
-**步骤4：索引维护**
-
-```cpp
-indexed_list.RemoveIndex(node);
-indexed_list.RemoveIndex(node->next);
-```
-
-**作用**：从索引中移除即将被合并的节点涉及的所有相邻对。
-
-**详细过程**：
-```
-合并前的链表：
-... [10] <-> [12] <-> [15] <-> [8] ...
-     prev    node    next     next2
-
-需要移除的索引条目：
-- index_[{10, 12}] 中的 prev指针
-- index_[{12, 15}] 中的 node指针
-- index_[{15, 8}] 中的 next指针
-```
-
-**步骤5：统计更新**
-
-这是最复杂的部分，需要更新4种统计：
-
-**5.1 减少被合并对的计数**
-```cpp
-stats->Remove(pair);  // (12,15) 的计数 -1
-```
-
-**5.2 更新右侧相邻对**
-```cpp
-if (node->next->next != nullptr) {
-    stats->Remove({node->next->value, node->next->next->value});  // 移除 (15,8)
-    stats->Insert({new_id, node->next->next->value});             // 添加 (42,8)
-}
-```
-
-**5.3 更新左侧相邻对**
-```cpp
-if (node->prev != nullptr) {
-    stats->Remove({node->prev->value, pair.first});  // 移除 (10,12)
-    stats->Insert({node->prev->value, new_id});      // 添加 (10,42)
-}
-```
-
-**统计更新的完整图示**：
-
-```
-合并前：
-... [10] <-> [12] <-> [15] <-> [8] ...
-相邻对：  (10,12)  (12,15)  (15,8)
-
-合并 (12,15) -> 42：
-... [10] <-> [42] <-> [8] ...
-相邻对：  (10,42)      (42,8)
-
-统计变化：
-- (12,15): count -= 1  ← 被合并的对
-- (10,12): count -= 1  ← 左侧旧对
-- (15,8):  count -= 1  ← 右侧旧对
-- (10,42): count += 1  ← 左侧新对
-- (42,8):  count += 1  ← 右侧新对
-```
-
-**步骤6：物理合并**
-
-```cpp
-auto* remove = node->next;
-node->next->Delete();  // 断开链表连接
-delete remove;         // 释放内存
-node->value = new_id;  // 更新token值
-```
-
-**Delete()函数的作用**：
-```cpp
-void Delete() {
-    if (prev) prev->next = next;  // 前驱指向后继
-    if (next) next->prev = prev;  // 后继指向前驱
-    next = prev = nullptr;        // 清空自己的指针
-}
-```
-
-**合并过程图示**：
-```
-步骤1 - 合并前：
-... [10] <-> [12] <-> [15] <-> [8] ...
-     prev    node    remove   next2
-
-步骤2 - 执行Delete()：
-remove->Delete() 使得:
-... [10] <-> [12]     [15] <-> [8] ...
-     prev    node              next2
-              ↓
-            连接断开
-
-步骤3 - 更新node：
-node->value = 42;
-... [10] <-> [42] <-> [8] ...
-     prev    node     next2
-```
-
-**步骤7：重建索引**
-
-```cpp
-indexed_list.UpdateIndex(node);
-```
-
-**作用**：为合并后的新节点重新建立相邻对索引。
-
-**UpdateIndex()的工作**：
-```cpp
-void UpdateIndex(Node* node) {
-    // 重建左侧相邻对索引
-    if (node->prev) {
-        InsertToIndex({node->prev->value, node->value}, node->prev);
+    Symbol& left = symbols[top->left];
+    Symbol& right = symbols[top->right];
+    left.piece = std::string_view(
+        left.piece.data(), left.piece.size() + right.piece.size());
+    left.next = right.next;
+    if (right.next >= 0) {
+        symbols[right.next].prev = top->left;
     }
+    right.piece = {};
 
-    // 重建右侧相邻对索引
-    if (node->next) {
-        InsertToIndex({node->value, node->next->value}, node);
-    }
+    MaybeAddPair(symbols[top->left].prev, top->left);
+    MaybeAddPair(top->left, symbols[top->left].next);
 }
 ```
 
-**完整Merge执行示例**
+合并直接扩展左侧 `string_view`，再修改 `next`、`prev` 索引并清空右侧 Symbol。因为两个片段来自同一段连续文本，所以无需创建新的字符串。
 
-**初始状态**
-```
-文本："hello" -> tokens: [8, 5, 12, 12, 15]
+**完整编码示例**
 
-链表：
-[8] <-> [5] <-> [12] <-> [12] <-> [15]
- n1     n2      n3       n4      n5
+假设模型学到了 `lo`、`low`、`est`，以及形成 `est` 所需的中间 piece，并为最终结果分配了示例 id：
 
-索引：
-index_[{5, 12}]  = [n2]
-index_[{12, 12}] = [n3]
-index_[{12, 15}] = [n4]
-
-统计：
-(5,12): 1次, (12,12): 1次, (12,15): 1次
+```text
+lo   → 300
+low  → 301
+est  → 417
 ```
 
-**执行：Merge({12, 12}, 24, list, &stats)**
+编码 `lowest` 的过程可以表示为：
 
-**第1步：定位**
-```cpp
-auto nodes = indexed_list.GetIndex({12, 12});  // 返回 [n3]
+```text
+l | o | w | e | s | t
+    ↓ l+o
+lo | w | e | s | t
+    ↓ lo+w
+low | e | s | t
+          ↓ 按模型中已有的中间合并形成 est
+low | est
+    ↓ 查询 id
+301 | 417
 ```
 
-**第2-3步：验证**
-```cpp
-node = n3;  // node->value = 12 ✓
-node->next = n4;  // node->next->value = 12 ✓
-// 验证通过
+实际结果完全由模型中的 piece 和 score 决定，示例 id 只用于说明过程。
+
+**Byte fallback**
+
+如果某个剩余片段不在普通词表中，Tokenizer 会将它转换成 UTF-8 字节，并逐字节输出对应的 byte piece：
+
+```text
+未知字符
+  ↓ UTF-8
+E7 8C AB
+  ↓ byte fallback
+<0xE7> | <0x8C> | <0xAB>
 ```
 
-**第4步：移除索引**
-```cpp
-RemoveIndex(n3):  移除 index_[{5,12}] 中的 n2
-                  移除 index_[{12,12}] 中的 n3
-RemoveIndex(n4):  移除 index_[{12,12}] 中的 n3 (已移除)
-                  移除 index_[{12,15}] 中的 n4
+因此任意输入都可以编码，不需要把整段文本替换成 `<unk>`。
+
+**解码**
+
+解码执行相反过程：普通 piece 直接拼接，byte piece 还原成原始字节，`UNKNOWN` 和控制 token 不写入文本，最后再把 `▁` 还原为空格。
+
+```text
+文本
+  ↓ Normalize / 必要的 PreTokenize
+UTF-8 Symbol
+  ↓ 按模型分数合并
+pieces
+  ↓ 查询词表
+token ids
+  ↓ 拼接与 byte 恢复
+文本
 ```
 
-**第5步：更新统计**
-```cpp
-stats->Remove({12, 12});        // (12,12): 1 -> 0
-stats->Remove({12, 15});        // (12,15): 1 -> 0
-stats->Remove({5, 12});         // (5,12): 1 -> 0
-stats->Insert({24, 15});        // (24,15): 0 -> 1
-stats->Insert({5, 24});         // (5,24): 0 -> 1
-```
-
-**第6步：物理合并**
-```cpp
-// 合并前：[5] <-> [12] <-> [12] <-> [15]
-//               n2      n3       n4      n5
-
-n4->Delete();    // 删除第二个12
-delete n4;       // 释放内存
-n3->value = 24;  // 第一个12变成24
-
-// 合并后：[5] <-> [24] <-> [15]
-//               n2      n3      n5
-```
-
-**第7步：重建索引**
-```cpp
-UpdateIndex(n3):
-  InsertToIndex({5, 24}, n2);   // 添加 index_[{5,24}] = [n2]
-  InsertToIndex({24, 15}, n3);  // 添加 index_[{24,15}] = [n3]
-```
-
-**最终状态**
-```
-链表：
-[8] <-> [5] <-> [24] <-> [15]
- n1     n2      n3       n5
-
-索引：
-index_[{8, 5}]   = [n1]
-index_[{5, 24}]  = [n2]
-index_[{24, 15}] = [n3]
-
-统计：
-(8,5): 1次, (5,24): 1次, (24,15): 1次
-```
-
-**总结**：增量更新的本质
-IndexedList:解决“在哪里"的问题
-```
-问题：找到(a,b)在文本中的所有位置
-传统：for循环遍历 - O(n)
-方案：维护 (a,b) → [位置1, 位置2, ...] 的映射，平均 O(1) 查找，O(r) 处理 r 个位置
-```
-Multiset：解决"多频繁"的问题
-```
-问题：快速知道哪个相邻对最频繁
-传统：每次重新统计所有对 - O(n)
-方案：维护动态的频率排序，增量更新 - O(log k)
-```
-关键洞察：合并(a,b)→c 只影响3种相邻对的统计：
-
-(a,b) 本身：次数-1
-(x,a) 模式：变成 (x,c)
-(b,y) 模式：变成 (c,y)
-
-假设我们要合并相邻对 (e,l) → el：
-```
-影响前：...t h e l l o w...
-相邻对：(t,h) (h,e) (e,l) (l,l) (l,o) (o,w)
-
-影响后：...t h el l o w...
-相邻对：(t,h) (h,el) (el,l) (l,o) (o,w)
-
-统计变化：
-- (e,l): -1  ← 被合并的对
-- (h,e): -1  ← 左邻旧对
-- (l,l): -1  ← 右邻旧对
-+ (h,el): +1  ← 左邻新对
-+ (el,l): +1  ← 右邻新对
-```
-**正确理解 BPE 合并**
-
-BPE 每次接收两个相邻 token `A B`，生成新 token `AB`。一次合并只改变被合并位置及其左右相邻对，这正是增量更新能够避免完整扫描的原因。
-
-TODO：要专门说下Pretokenize怎么搞，以及Multiset这套其实意义不大
+至此，SentencePiece 的训练与推理形成闭环：Normalize 统一字符表示，PreTokenize 确定合并边界，Counter 学习词表，Tokenizer 使用同一模型完成编码和解码。
