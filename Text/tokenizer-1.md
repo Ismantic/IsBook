@@ -469,3 +469,5 @@ token ids
 ```
 
 至此，SentencePiece 的训练与推理形成闭环：Normalize 统一字符表示，PreTokenize 确定合并边界，Counter 学习词表，Tokenizer 使用同一模型完成编码和解码。
+
+配套实现：[Ismantic/PieceTokenizer](https://github.com/Ismantic/PieceTokenizer)

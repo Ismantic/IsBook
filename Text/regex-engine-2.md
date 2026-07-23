@@ -2,9 +2,7 @@
 
 ## 引言
 
-本篇在[正则表达式引擎：基础篇](regex-engine-1.md)的实现上继续扩展，目标是支持 Tokenizer 预分词所需的正则语法。整体仍采用递归下降解析、AST、Thompson NFA、DFA 和匹配器组成的流水线，同时增加以下能力：
-
-本文对应 `src/new_regex.cc`。
+本篇在[正则表达式引擎：基础篇](regex-engine-1.md)的实现上继续扩展，目标是支持 Tokenizer 预分词所需的正则语法。整体仍采用递归下降解析、AST、Thompson NFA、DFA 和匹配器组成的流水线，对应实现为 `src/regex-2.cc`。
 
 高级篇最关键的变化是引入**字符集合**。基础篇的一条 NFA 边只匹配一个确定的 codepoint，例如 `'a'`；字符类 `[abc]`、Unicode 属性 `\p{H}` 和补集 `[^...]` 则要求一条边匹配一组甚至大量字符。直接枚举 Unicode codepoint 不现实，因此本篇用谓词函数表示集合：
 
@@ -63,7 +61,7 @@ Lazy DFA
 
 **与 Regex 的对应关系**
 
-| 组件 | Regex | NewRegex | 变化 |
+| 组件 | Regex | Regex 2 | 变化 |
 |------|-------|---------|------|
 | AST 节点 | 8 种 | 9 种 | +CharClassAst |
 | Parser | 基础语法 | +`[...]` `\p{A}` `\p{H}` `\p{N}` `\s` | 面向目标 Pattern 扩展 |
@@ -101,7 +99,7 @@ static bool IsHan(uint32_t c) {
 
 **CharPred — 谓词化的字符匹配**
 
-这是 NewRegex 和 Regex 最核心的架构差异。
+这是高级实现与基础实现最核心的架构差异。
 
 **Regex 的方案**
 
@@ -114,7 +112,7 @@ std::map<uint32_t, std::vector<NFAState*>> transitions;
 
 这种方案对字面量字符很自然，但无法高效表示 `\p{H}`（覆盖大量 codepoint）或 `[^abc]`（取反集合）。
 
-**NewRegex 的方案**
+**高级实现的方案**
 
 用 `std::function<bool(uint32_t)>` 作为边的匹配条件：
 
@@ -235,10 +233,10 @@ class CharClassAst : public Ast {
 start->InsertTransition(codepoint, end);
 ```
 
-NewRegex 中统一用 CharPred：
+高级实现统一使用 CharPred：
 
 ```cpp
-// NewRegex
+// regex-2
 void PushPred(CharPred pred) {
     auto *s = NewState(), *e = NewState();
     e->accept = true;
@@ -266,7 +264,7 @@ void Visit(const CharClassAst* n) override {
 
 Regex 的 DFA 用完整的子集构造：预先计算所有可达的 DFA 状态。当 NFA 边是具体字符时，字母表有限，没有问题。
 
-但 NewRegex 的 NFA 边是谓词，一个 `\p{A}` 覆盖几万个 codepoint。如果为每个 codepoint 维护 DFA 转移表，空间会爆炸。
+但高级实现的 NFA 边是谓词，一个 `\p{A}` 会覆盖大量码点。如果为每个码点维护 DFA 转移表，空间会迅速膨胀。
 
 **方案：等价类 + 按需构建**
 
@@ -340,7 +338,7 @@ int Step(int dfa_st, uint32_t cp) {
 
 **与 Regex DFA 的对比**
 
-| | Regex DFA | NewRegex Lazy DFA |
+| | Regex DFA | Regex 2 Lazy DFA |
 |---|---|---|
 | 构建时机 | 编译时一次性全部构建 | 运行时按需构建 |
 | 转移表 key | Unicode codepoint | 等价类 ID |
@@ -350,7 +348,7 @@ int Step(int dfa_st, uint32_t cp) {
 
 **Segment — 文本分段**
 
-Regex 只有 `Match`（全文匹配），NewRegex 增加了 `Segment`（从左到右产生不重叠的最长匹配片段），这是 Tokenizer 的核心需求。
+基础实现只有 `Match`（全文匹配），高级实现增加了 `Segment`（从左到右产生不重叠的最长匹配片段），这是 Tokenizer 的核心需求。
 
 **算法：左到右、最长匹配**
 
@@ -526,7 +524,7 @@ pos=12: MatchAt("!")            → 1 ("!")        → 输出 "!"
 - 对覆盖全部输入的 Tokenizer Pattern，Segment 通常按匹配长度向前推进，热缓存下接近 O(|text|)
 - 对一般 Pattern，某个起点可能扫描很远后失败，再从下一个字符重试，最坏可达到 O(|text|²)
 - Lazy DFA 的首次运行还要承担状态和转移的构建成本，不能与已经完整预构建的 DFA 简单视为相同常数开销
-- `new_regex.cc` 的 `MatchAt` 在解码每个字符时会构造剩余文本的临时 `std::string`，因此实测结果还包含额外分配与复制成本。面向吞吐量优化时，应改为直接按指针和剩余长度解码
+- `regex-2.cc` 的 `MatchAt` 在解码每个字符时会构造剩余文本的临时 `std::string`，因此实测结果还包含额外分配与复制成本。面向吞吐量优化时，应改为直接按指针和剩余长度解码
 
 **空间复杂度**
 
@@ -535,3 +533,5 @@ pos=12: MatchAt("!")            → 1 ("!")        → 输出 "!"
 - 等价类：最多受谓词真假签名数限制，理论上可达 O(2^|preds|)，实际通常少得多
 
 至此，正则引擎已经能将文本切分成适合后续统计的字符串片段。这些片段还不是最终的 token ID；后续 Tokenizer 章节将继续讲解归一化、预分词、频率统计、词表训练和编码过程。
+
+配套实现：[Ismantic/Regex](https://github.com/Ismantic/Regex)

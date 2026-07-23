@@ -44,7 +44,7 @@ y* = argmax P(y)
 
 第二列是词频，不是已经归一化的概率。`Cutter::Build` 计算完整词典的总频次 `sum`，查询一个已登录词时再得到对数概率：
 
-```Cpp
+```cpp
 double GetTrieValue(const std::string& word) {
     auto result = da_.GetUnit(word);
     if (!result.found || result.value == 0) {
@@ -107,7 +107,7 @@ DictCut 将一个连续汉字段表示成有向无环图。节点是 UTF-8 字�
 
 代码中的 `DAG` 使用 `G[i]` 保存从字节位置 `i` 出发的边，其元素是候选词最后一个字节的位置：
 
-```Cpp
+```cpp
 std::vector<std::set<int>> Cutter::DAG(
     const std::string& sentence) {
     int n = sentence.length();
@@ -153,7 +153,7 @@ route[i].second = 最优路径第一条边的结束位置
 
 对应源码是：
 
-```Cpp
+```cpp
 std::vector<float_i> Cutter::Compute(
     const std::string& sentence,
     const std::vector<std::set<int>>& G) {
@@ -188,7 +188,7 @@ std::vector<float_i> Cutter::Compute(
 
 动态规划完成后，从句首沿 `route` 向后移动即可恢复结果，不需要再反转：
 
-```Cpp
+```cpp
 std::vector<std::string> Cutter::CutSegment(
     const std::string& sentence) {
     auto G = DAG(sentence);
@@ -213,7 +213,7 @@ std::vector<std::string> Cutter::CutSegment(
 
 构建 Trie 前，词语和频次需要保持一一对应，并按照词语排序：
 
-```Cpp
+```cpp
 void Cutter::Build(const std::vector<std::string>& words,
                    const std::vector<int>& freqs) {
     sum_ = 0;
@@ -240,7 +240,7 @@ void Cutter::Build(const std::vector<std::string>& words,
 
 Trie 的终止节点直接保存整数频次。切分时，`PrefixSearch` 返回当前位置能够匹配的全部词典前缀及其字节长度：
 
-```Cpp
+```cpp
 auto matches = da_.PrefixSearch(sentence.substr(i));
 for (const auto& match : matches) {
     G[i].insert(i + match.length - 1);
@@ -255,7 +255,7 @@ for (const auto& match : matches) {
 
 词典不可能覆盖所有汉字。为了保证 DAG 始终存在一条从句首到句尾的完整路径，DictCut 会在每个 UTF-8 字符位置加入一条单字符边：
 
-```Cpp
+```cpp
 int charlen = ustr::CharLen(
     static_cast<uint8_t>(sentence[i]));
 graph[i].insert(i + charlen - 1);
@@ -287,7 +287,7 @@ word<TAB>frequency
 
 DictCut 首先使用正向最长匹配完成冷启动。`Segmenter` 从当前位置查询 Trie 中的全部前缀并选择最长候选；如果没有候选，就回退到一个 UTF-8 字符：
 
-```Cpp
+```cpp
 while (i < sentence.size()) {
     auto matches = da_.PrefixSearch(sentence.substr(i));
     size_t best_len = 0;
@@ -334,7 +334,7 @@ loss(word)
 = 原最优路径得分 - 删除该词后的最优路径得分
 ```
 
-```Cpp
+```cpp
 double best_score = route[0].first;
 
 graph[word.start].erase(word.end);
@@ -348,7 +348,7 @@ loss 越大，说明删除这个词造成的概率损失越大，它越难被其
 
 单字边不能删除，否则可能破坏完整路径。对于单字，代码直接比较它作为已登录词和未知字时的得分：
 
-```Cpp
+```cpp
 double known = GetTrieValue(word);
 double unknown = std::log(1.0 / sum_);
 loss[word] += known - unknown;
@@ -387,3 +387,5 @@ word<TAB>frequency
 ```
 
 最终词典既可以直接交给 DictCut 做中文分词，也可以由 PieceTokenizer 在 PreTokenize 阶段加载：DictCut 负责确定中文词边界，SentencePiece 再在每个词内部学习子词。
+
+配套实现：[Ismantic/DictCut](https://github.com/Ismantic/DictCut)

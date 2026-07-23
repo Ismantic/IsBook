@@ -1,45 +1,47 @@
-# Tokenizer: BytePiece
+# Tokenizer：BytePiece
 
 ## 引言
 
-BytePieceCounter 是 PieceTokenizer 的训练组件，用于从原始语料中生成候选 piece、估计分数并裁剪词表。
+BytePieceCounter 是 PieceTokenizer 的训练组件，用于从原始语料中生成候选 piece、统计权重并裁剪词表。
 
 本文的基本算法参考了[苏剑林的实现](https://kexue.fm/archives/9752)，本项目将其改写为 C++，并增加 UTF-8 切分边界约束。
 
 **核心任务：**
 
 **输入**：大量原始文本语料
-**输出**：训练好的Unigram语言模型，包含：
-- 词汇表：各种粒度的subword pieces
-- 概率值：每个piece的出现概率
+**输出**：训练好的 BytePiece 模型，包含：
+- 词汇表：不同粒度的 subword pieces
+- 计数权重：每个 piece 经重分词后得到的频次
 
 
 **基本思路：**
-- **统计阶段**：收集文本中所有字节级N-gram的统计信息
+- **统计阶段**：收集文本中所有字节级 N-gram 的统计信息
 - **标注阶段**：使用动态规划找到最优分词方案
 - **剪枝阶段**：移除低频或冗余的词汇，优化词汇表大小
-- **迭代收敛**：重复上述过程直到词汇表稳定
+- **重分词阶段**：用保留词表重新切分候选，回收被裁剪 piece 的计数
 
-注：BytePieceCounter在训练过程中的剪枝阶段需要使用BytePieceTokenizer。
+BytePieceCounter 在训练过程中的剪枝阶段需要使用 BytePieceTokenizer 对被裁剪片段重新切分。
 
 ## 统计
 
-**N-Gram 统计**
+**N-gram 统计**
 
-N-Gram 模型基于有限阶马尔可夫假设：当前符号的概率只依赖于前面的 \\(N-1\\) 个符号。这里的符号是字节，不是词。
+N-gram 模型基于有限阶马尔可夫假设：当前符号的概率只依赖于前面的 $N-1$ 个符号。这里的符号是字节，不是词。
 
-**传统N-Gram模型**：
-```
-P(w₁w₂...wₘ) = ∏ P(wᵢ|wᵢ₋ₙ₊₁...wᵢ₋₁)
-```
+$$
+\begin{aligned}
+P(w_1w_2\ldots w_m)
+&= \prod_i P(w_i\mid w_{i-N+1}\ldots w_{i-1})
+\end{aligned}
+$$
 
 BytePieceCounter 先统计字节级 N-gram，再利用这些局部条件概率给候选 piece 评分。最终词表中的 piece 必须在 UTF-8 字符边界切分，但 piece 内部的滑动 N-gram 可以从任意字节位置开始。
 
 **核心数据结构**
 
-BytePieceCounter使用一个关键的数据结构来存储不同长度的N-Gram统计：
+BytePieceCounter 使用一组哈希表存储不同长度的 N-gram 统计：
 
-```Cpp
+```cpp
 std::vector<std::unordered_map<std::string, float_t>> N_;
 ```
 
@@ -48,34 +50,34 @@ std::vector<std::unordered_map<std::string, float_t>> N_;
 - `N_[0]`：空字符串（用于归一化）
 - `N_[1]`：所有 1-gram（单字节）
 - `N_[2]`：所有 2-gram（字节对）
-- `N_[3]`：所有3-gram（三字节组合）
+- `N_[3]`：所有 3-gram（三字节组合）
 - ...
-- `N_[max]`：最长统计的N-gram（通常max=6）
+- `N_[6]`：最长统计的 N-gram
 
 **示例初始化**：
-```Cpp
+```cpp
 N_.clear();
-N_.resize(max + 1);  // 通常max = 6
+N_.resize(max_piece_count_ + 1);  // max_piece_count_ = 6
 N_[0][""] = 0;  // 空字符串初始化
 ```
 
-**为什么选择字节级N-Gram?**
-1. **语言无关性**：任何UTF-8文本都能统一处理
-2. **完备性**：保证100%覆盖，不存在未知字符
+**为什么选择字节级 N-gram？**
+1. **语言无关性**：任何 UTF-8 文本都能统一处理
+2. **完备性**：保证 100% 覆盖，不存在未知字符
 3. **细粒度模式**：能够发现字符内部和跨字符的统计规律
 
 
 **具体实现**
 
-```Cpp
-void CountRaw(const std::vector<std::string>& sentences) {
+```cpp
+void CountRawSegments(const std::vector<std::string>& segments) {
     // 初始化N_数组
     N_.clear();
     N_.resize(max + 1);
     N_[0][""] = 0;  // 空字符串计数
 
     // 对每个文本的每个位置，统计所有可能长度的子串
-    for (const auto& text : sentences) {
+    for (const auto& text : segments) {
         for (size_t i = 0; i < text.length(); ++i) {
             for (size_t j = 0; j <= max; ++j) {
                 if (i + j <= text.length()) {
@@ -91,7 +93,7 @@ void CountRaw(const std::vector<std::string>& sentences) {
 **统计示例**：
 ```
 文本："南京市长江大桥"
-UTF-8字节序列：[E5,8D,97,E4,BA,AC,E5,B8,82,E9,95,BF,E6,B1,9F,E5,A4,A7,E6,A1,A5]
+UTF-8 字节序列：[E5,8D,97,E4,BA,AC,E5,B8,82,E9,95,BF,E6,B1,9F,E5,A4,A7,E6,A1,A5]
 总字节数：21
 
 填充N_数组：
@@ -123,12 +125,12 @@ N_[6]（6-Gram，节选）：
 # 实际统计同样包含从字符内部开始的6字节滑动窗口
 ```
 
-`CountRaw` 得到的是出现次数，不是概率。随后用相邻阶的计数比估计条件概率：
+实际的 `StreamCountRaw` 会分批读取语料，先经过 PreTokenizer，再由多个线程执行上面的统计核心。得到的是出现次数，不是概率；随后用相邻阶的计数比估计条件概率：
 
 
-**目标**：计算P(C|AB) = P(ABC) / P(AB)
+**目标**：计算 $P(C\mid AB)=P(ABC)/P(AB)$
 
-**对数形式**：log P(C|AB) = log P(ABC) - log P(AB)
+**对数形式**：$\log P(C\mid AB)=\log P(ABC)-\log P(AB)$
 
 ```cpp
 void PruneRaw() {
@@ -141,13 +143,14 @@ void PruneRaw() {
         }
     }
 
-    // 从最长N-gram开始向下处理
+    // 从最长 N-gram 开始向下处理
     for (int i = N_.size() - 1; i >= 0; --i) {
         std::unordered_map<std::string, float_t> pruned;
 
         // 1. 频率过滤 + 对数概率转换
         for (const auto& [k, v] : N_[i]) {
-            if (k.length() == i && v >= (i > 1 ? min_count_ : 0)) {
+            if (k.length() == i &&
+                v >= (i > 1 ? counter_spec_.min_count() : 0)) {
                 pruned[k] = std::log(v);  // 先保存对数计数
             }
         }
@@ -184,7 +187,7 @@ N_[2]: 包含log P(byte₂|byte₁)
 
 N_[3]: 包含log P(byte₃|byte₁byte₂)
 {E58D97: log P(97|E58D), E4BAAC: log P(AC|E4BA), ...}
-# 这一层特别重要，对应完整UTF-8 字符的条件概率
+# 这一层特别重要，对应完整 UTF-8 字符的条件概率
 
 N_[4]: 包含log P(byte₄|byte₁byte₂byte₃)
 ...
@@ -194,7 +197,7 @@ N_[4]: 包含log P(byte₄|byte₁byte₂byte₃)
 
 **状态空间**
 
-**关键区别**：与BytePieceTokenizer不同，这里的状态空间更复杂：
+这里的状态空间服务于模型训练，与最终 BytePieceTokenizer 使用的词图动态规划不同：
 
 **BytePieceCounter 的状态**：
 - 共有 `max` 个状态：0, 1, 2, ..., max-1
@@ -268,10 +271,7 @@ P(ABCDEFGH) = P(A)P(B|A)P(C|AB)P(D|ABC)P(E|ABCD)P(F|ABCDE)P(G|BCDEF)P(H|CDEFG)
 8. 'H' → 状态5→状态5，使用N_[6]["CDEFGH"] - N_[5]["CDEFG"] ★ 自环
 ```
 
-**关键洞察**：
-- 虽然N-Gram统计只到6-Gram，但通过状态5的自环机制
-- 算法可以使用最近 6 个字节的条件概率持续评估更长的 piece
-- 这实现了在有限统计基础上支持无限长度token的生成
+虽然 N-gram 统计只到 6-gram，但状态 5 的自环可以使用滑动窗口继续评估更长的 piece。piece 最终仍会受到 `max_piece_size` 的裁剪约束，默认不超过 18 字节。
 
 **状态转移表示例**（max=6）：
 ```
@@ -289,22 +289,21 @@ T矩阵（简化表示，0表示允许转移，-∞表示不允许）：
 
 **具体实现**
 
-BytePieceCounter 的核心是一个复杂的动态规划算法，它需要在字节级统计基础上实现字符级分词，因而要引入UTF-8边界约束。
+BytePieceCounter 的核心是一个动态规划算法：在字节级统计的基础上实现字符级切分，因此需要引入 UTF-8 边界约束。
 
 
 **UTF-8 位置预处理**
 
-虽然N-Gram统计是字节级的，但最终分词必须是字符级的。算法首先检测UTF-8 字符边界：
+虽然 N-gram 统计是字节级的，但最终切分必须保持字符完整。算法首先检测 UTF-8 字符边界：
 
-```Cpp
-// UTF-8 位置预处理：标记每个字节在UTF-8 字符中的位置
+```cpp
+// UTF-8 位置预处理：标记每个字节在 UTF-8 字符中的位置
 std::vector<int> utf8_position(num, 0);
 int i = 0;
 while (i < num) {
-    unsigned char c = static_cast<unsigned char>(text[i]);
-    int char_length = SizeUTF8(c);
+    int char_length = ustr::OneUTF8Size(text.data() + i);
 
-    // 标记UTF-8 字符的每个字节位置
+    // 标记 UTF-8 字符的每个字节位置
     for (int j = 0; j < char_length && i + j < num; ++j) {
         utf8_position[i + j] = j;  // 0=首字节, 1=第二字节, 2=第三字节
     }
@@ -328,55 +327,53 @@ utf8_position: [0, 1, 2, 0, 1, 2]
 ```
 
 
-**约束机制总体设计**
+**UTF-8 约束**
 
-基于utf8_position数组，算法采用了以下约束策略：
+`utf8_position[i]` 记录字节 `i` 在当前 UTF-8 字符中的偏移。状态转移需要满足三条规则：
 
-**1. 状态有效性约束**
-- 在UTF-8 字符的非首字节位置，禁止进入较小的状态
-- 具体措施：跳过不符合条件的状态，不填充对应的scores[i][j]
+1. 状态 0 只能出现在字符首字节，避免从字符内部开始 token。
+2. 当前状态和前一状态不能小于对应的字符内偏移，保证路径覆盖完整字符。
+3. 普通 N-gram 的起点必须位于字符边界；状态 5 自环使用滑动 6-gram 时不受此限制。
 
-**举例说明**：
-```
-在位置1（字节8D，utf8_position[1]=1）：
-- 状态0：禁止 ✗ （状态0 < 1，意味着从UTF-8 字符中间开始新token）
-- 状态1：允许 ✓ （状态1 ≥ 1，当前token长度=2，覆盖了首字节E5和当前字节8D）
-- 状态2：允许 ✓ （状态2 ≥ 1，当前token长度=3，可能包含更多前缀）
+因此，piece 的起止位置始终落在 UTF-8 字符边界，而长 piece 内部的滑动窗口仍可跨越字符边界。
 
-在位置3（字节E4，utf8_position[3]=0）：
-- 状态0,1,2,3...：都允许 ✓ （新字符开始，任何状态都合法）
-```
+**转移示例**
 
-**2. 转移路径约束**
-- 在状态转移时，检查前后位置的UTF-8约束
-- 具体措施：在DP转移循环中continue跳过不合法的转移
+仍以“南京”为例。状态从 0 开始，表示当前 token 已包含一个字节：
 
-**举例说明**：
-```
-从位置2到位置3的状态转移：
-位置2：utf8_position[2]=2 → 位置3：utf8_position[3]=0
-
-合法转移：
-- 状态2 → 状态0：允许 ✓ （状态2≥2，且可以转移到任何状态）
-- 状态2 → 状态3：允许 ✓ （状态2≥2，token继续增长）
-
-非法转移（会被跳过）：
-- 状态1 → 任何状态：禁止 ✗ （位置2的状态1<2，不满足UTF-8约束）
-- 状态0 → 任何状态：禁止 ✗ （位置2的状态0<2，不满足UTF-8约束）
+```text
+位置：       0   1   2   3   4   5
+字节：      E5  8D  97  E4  BA  AC
+字符内偏移： 0   1   2   0   1   2
 ```
 
-**3. 切分点约束**
-- 最终的token边界必须在UTF-8 字符边界上
-- 具体措施：在回溯时只在utf8_position[i]==0的位置设置切分点
+处理“南”的三个字节时，合法路径依次为：
 
-注意，UTF-8 约束只限制 token 的起点和终点，不限制 piece 内部滑动 N-gram 的起点。跨越字符边界的字节窗口仍然是合法的统计上下文。
+```text
+位置 0：状态 0，token 从 E5 开始
+位置 1：状态 0 → 1，继续读入 8D
+位置 2：状态 1 → 2，继续读入 97
+```
+
+位置 1 不能进入状态 0，否则 token 会从续字节 `8D` 开始；位置 2 也不能处于状态 0 或 1，因为这样的 token 无法覆盖“南”的完整三个字节。
+
+来到位置 3，即“京”的首字节 `E4`，有两种合法选择：
+
+```text
+状态 2 → 0：在“南”和“京”之间切分
+状态 2 → 3：不切分，让当前 token 继续增长
+```
+
+第一条路径产生“南 / 京”，第二条路径则可能产生“南京”。两条路径都会进入动态规划，由累计 N-gram 得分决定最终结果。反过来，若一个普通窗口的起点落在 `8D` 或 `97` 这样的续字节上，即使状态编号能够连接，也会被 `ngram_start` 检查排除。
+
+当 token 达到 6 字节后，状态进入 5。若继续读取第三个汉字，状态 5 可以自环，此时 6-gram 窗口会向前滑动，起点允许落在字符内部；这只是评分窗口移动，token 本身仍从原来的字符边界开始。
 
 
 **动态规划框架**
 
 基于上述约束机制，动态规划算法的整体结构如下：
 
-```Cpp
+```cpp
 std::vector<std::string> Tokenize(const std::string& text) const {
     const int num = text.length();
     if (num == 0) return {};
@@ -395,14 +392,14 @@ std::vector<std::string> Tokenize(const std::string& text) const {
 
 **核心思想**：寻找一条穿越状态空间的最优路径，使得总概率最大化。
 
-**节点评分填充（应用约束1）**
+**节点评分填充**
 
-```Cpp
-    // 3. 填充节点评分（基于N-Gram统计）
+```cpp
+// 3. 填充节点评分（基于 N-gram 统计）
     for (int j = 0; j < max; ++j) {
         for (int i = j; i < num; ++i) {
-            // 约束1：状态有效性约束
-            if (j < utf8_position[i]) continue;  // 跳过无效状态
+            // 状态 0 只能从 UTF-8 字符边界开始
+            if (j == 0 && utf8_position[i] > 0) continue;
 
             std::string piece = text.substr(i - j, j + 1);
             if (j + 1 < N_.size()) {
@@ -415,33 +412,35 @@ std::vector<std::string> Tokenize(const std::string& text) const {
     }
 ```
 
-**约束1效果**：
-- 位置1（UTF-8第二字节）：只填充状态≥1的scores，状态0保持-INF
-- 位置2（UTF-8第三字节）：只填充状态≥2的scores
-- 位置3（新字符开始）：可以填充任何状态的scores
+这一步提取可用的 N-gram 得分，并排除从 UTF-8 字符内部开始的新 token。更完整的状态合法性在随后的转移阶段检查。
 
-其实这一步也可以看成是把合理的N-gram 概率取出来。
-
-**动态规划状态转移（应用约束2）**
+**动态规划状态转移**
 
 关键是过滤掉不合理的转移 （某些状态不需要转移以及某些状态之间不能转移）。
 
-```Cpp
-    // 4. 动态规划核心：寻找最优路径
+```cpp
+// 4. 动态规划核心：寻找最优路径
     for (int i = 1; i < num; ++i) {
         for (int curr_j = 0; curr_j < max; ++curr_j) {
-            // 约束1：当前状态的UTF-8约束检查
+            // 当前状态的 UTF-8 约束检查
             if (curr_j < utf8_position[i]) continue;
 
             int best_prev_j = -1;
             float_t best_score = -INF;
 
             for (int prev_j = 0; prev_j < max; ++prev_j) {
-                // 约束2：前一位置的UTF-8约束
+                // 前一位置的 UTF-8 约束
                 if (prev_j < utf8_position[i-1]) continue;
 
                 // 状态转移约束（基于T矩阵）
                 if (T_[prev_j][curr_j] == -INF) continue;
+
+                // 普通窗口必须从字符边界开始；饱和状态自环除外
+                bool sliding = prev_j == max - 1 && curr_j == max - 1;
+                int ngram_start = i - curr_j;
+                if (!sliding && ngram_start > 0 &&
+                    utf8_position[ngram_start] > 0) continue;
+
                 // 计算转移得分
                 float_t score = scores[i-1][prev_j] + T_[prev_j][curr_j] + scores[i][curr_j];
 
@@ -461,25 +460,12 @@ std::vector<std::string> Tokenize(const std::string& text) const {
     }
 ```
 
-**关键约束详解**
+`curr_j` 和 `prev_j` 的检查保证状态覆盖当前字符已经经过的字节数；`ngram_start` 的检查则让非滑动窗口从字符边界开始。这两类约束分别负责路径合法性和候选 piece 的起点合法性。
 
-**约束1 - 状态有效性**：`curr_j < utf8_position[i]`
-```
-含义：如果当前字节是UTF-8的第k字节，那么状态必须≥k
-原因：状态j表示当前token长度为j+1，如果j<k，意味着token长度小于当前UTF-8 字符的字节位置，
-      这会导致token从UTF-8 字符中间开始，违反字符完整性
-```
+**最优路径回溯**
 
-**约束2 - 转移路径**：`prev_j < utf8_position[i-1]`
-```
-含义：前一位置的状态也必须满足相同的UTF-8约束
-原因：确保状态转移路径的连续性和合法性
-```
-
-**最优路径回溯（应用约束3）**
-
-```Cpp
-    // 5. 找到最后位置的最佳状态
+```cpp
+// 5. 找到最后位置的最佳状态
     int best_last_state = 0;
     float_t best_score = -INF;
     for (int j = 0; j < max; ++j) {
@@ -504,12 +490,12 @@ std::vector<std::string> Tokenize(const std::string& text) const {
         }
     }
 
-    // 7. 根据路径提取tokens（应用约束3）
+    // 7. 根据路径提取tokens
     std::vector<int> split_points;
     split_points.push_back(0);
 
     for (int i = 1; i < opt_route.size(); ++i) {
-        // 约束3：只在UTF-8首字节处切分
+        // 只在 UTF-8 首字节处切分
         if (opt_route[i] == 0 && utf8_position[i] == 0) {
             split_points.push_back(i);
         }
@@ -529,74 +515,47 @@ std::vector<std::string> Tokenize(const std::string& text) const {
 
 ## 裁剪
 
-**迭代策略**
+第一次标注会产生大量候选 piece。`PrunePieces` 先按 `max_piece_size` 和 `min_count` 分成保留集合与裁剪集合，再把被裁剪 piece 的计数重新分配给保留词表：
 
-```Cpp
-Str2Int PrunePieces(Str2Int& pieces) {
-    Str2Int keep, drop;
-
-    // 第一轮过滤：按长度和频率
-    for (const auto& [str, cnt] : pieces) {
-        if (str.length() == 1 ||  // 保留全部单字节piece（保证字节回退）
-            (str.length() <= max_piece_size_ && cnt >= min_count_)) {
-            keep[str] = cnt;
-        } else {
-            drop[str] = cnt;  // 标记为丢弃
-        }
+```cpp
+for (const auto& [piece, count] : pieces) {
+    if (piece.length() <= counter_spec_.max_piece_size() &&
+        count >= counter_spec_.min_count()) {
+        keep[piece] = count;
+    } else {
+        drop[piece] = count;
     }
+}
 
-    // 重分词被丢弃的pieces
-    auto new_counter = SplitPieces(keep, drop);
-    for (const auto& [str, cnt] : new_counter) {
-        keep[str] += cnt;  // 更新保留pieces的频率
-    }
-
-    // 迭代到达不动点，并设置上限避免异常振荡
-    for (int iteration = 0; iteration < max_iterations_; ++iteration) {
-        auto entire_keep_as_drop = keep;
-        auto next = SplitPieces(keep, entire_keep_as_drop);
-        if (next == keep) break;
-        keep = std::move(next);
-    }
-
-    return FinalSelection(keep);  // 最终筛选到目标大小
+for (const auto& [piece, count] : SplitPieces(keep, drop)) {
+    keep[piece] += count;
 }
 ```
 
-**核心机制**
+`SplitPieces` 用保留集合构建临时 BytePieceTokenizer。构造函数会把计数归一化为对数概率，然后用最大概率路径重新切分待裁剪内容：
 
-```Cpp
+```cpp
 Str2Int SplitPieces(const Str2Int& keep, const Str2Int& drop) {
-    // 1. 基于keep构建临时Unigram分词器
     std::unordered_map<std::string, float_t> dict;
-    double total = 0.0;
-    for (const auto& [piece, cnt] : keep) {
-        total += cnt;
-    }
-    if (total <= 0.0) return {};
-
-    for (const auto& p : keep) {
-        dict.emplace(
-            p.first,
-            static_cast<float_t>(p.second / total)
-        );
+    for (const auto& [piece, count] : keep) {
+        dict.emplace(piece, static_cast<float_t>(count));
     }
     BytePieceTokenizer tokenizer(dict);
 
-    // 2. 用临时分词器重新分词drop中的内容
     Str2Int counter;
-    for (const auto& [str, cnt] : drop) {
-        auto tokens = tokenizer.Tokenize(str);  // 基于词汇表的分词
-        for (const auto& token : tokens) {
-            counter[token] += cnt;  // 统计重分词后的频率
+    for (const auto& [piece, count] : drop) {
+        for (const auto& token : tokenizer.Tokenize(piece)) {
+            counter[token] += count;
         }
     }
-
     return counter;
 }
 ```
 
-**示例**：
+随后，算法反复用当前词表切分其全部 piece，直到词表大小不再变化。最后若候选数仍超过目标 `vocab_size`，则排序截断：单字节候选优先，其余候选主要按计数降序排列。这里的单字节候选是普通候选；真正保证任意输入可编码的是模型初始化时单独加入的 256 个 `BYTE` 类型元词条。
+
+**计数再分配示例**
+
 ```
 假设keep = {"南京", "市", "长江", "大桥"}
      drop = {"南京市", "市长江", "长江大桥"}
@@ -614,19 +573,6 @@ keep["南京"] += 1  # 原频率 + 重分词贡献
 keep["市"] += 2
 keep["长江"] += 2
 keep["大桥"] += 1
-```
-
-**收敛性**
-
-每轮重分词产生的 piece 都来自当前词表，因此候选集合不会扩张。但仅比较词表大小并不能判断收敛：词条集合或计数可能在大小不变时继续变化。实现应比较完整结果是否达到不动点，同时设置最大迭代次数作为保护。
-
-**收敛过程**：
-```
-迭代0：pieces = {所有N-gram}，大小=100,000
-迭代1：剪枝低频 → 大小=50,000
-迭代2：重分词后剪枝 → 大小=30,000
-迭代3：继续剪枝 → 大小=25,000
-迭代4：词条及计数均不再变化 → 收敛
 ```
 
 ## 示例
@@ -704,18 +650,20 @@ log P(BA | 97 E4)  = -0.1
 京市    1
 ```
 
-若 `min_count = 2`，则“南京市”和“京市”进入待裁剪集合。临时 Unigram 分词器使用保留词表重新切分它们：
+若 `min_count = 2`，则“南京市”和“京市”进入待裁剪集合。临时 BytePieceTokenizer 使用保留词表重新切分它们：
 
 ```text
 南京市 → 南京 / 市
 京市   → 京 / 市
 ```
 
-相应计数被转移到仍然保留的 piece。完成所有重分词并达到不动点后，使用完整保留词表的计数和 `Z` 归一化：
+相应计数被转移到仍然保留的 piece。重分词完成后，模型保存 piece 及其计数权重；BytePieceTokenizer 加载词表时再进行归一化：
 
 ```text
 P(piece) = count(piece) / Z
 Z = Σ count(piece)
 ```
 
-最终写入模型的是 piece 及其概率；256 个单字节 piece 始终保留，负责处理词表没有覆盖的输入。至此，字节 N-gram 统计、最优路径标注、词表裁剪和 Unigram 概率生成形成了完整闭环。
+此外，模型会单独保存 256 个 `BYTE` 类型元词条。普通词表未覆盖某段输入时，编码过程会回退到这些字节词条，从而保证任意字节序列都可表示。至此，字节 N-gram 统计、最优路径标注、词表裁剪和字节回退形成了完整闭环。
+
+配套实现：[Ismantic/PieceTokenizer](https://github.com/Ismantic/PieceTokenizer)

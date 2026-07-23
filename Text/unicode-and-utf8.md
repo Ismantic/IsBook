@@ -2,25 +2,25 @@
 
 ## Unicode
 
-Unicode指的就是把全世界各种文字的"字"都编码成一个个具体的数字，比如：
+Unicode 为世界各地文字、符号和控制字符分配统一的码点，例如：
 
 - **英文**：`'a'` → 97, `'b'` → 98, `'c'` → 99, ...
 - **中文**：`'你'` → 20320, `'我'` → 25105, `'他'` → 20182, ...  
 - **Emoji**：`'😀'` → 128512, `'🌍'` → 127757, ...
 
-全部的数字范围现在是2³²，也就是用`uint32_t`来表示，实际上是没有用满的。目前登记在用的字符超过了15万个，但理论上Unicode的有效范围是0到0x10FFFF（约110万个码点）。
+Unicode 码点通常用 `uint32_t` 保存，但有效范围只有 `U+0000` 到 `U+10FFFF`，其中代理项区间 `U+D800` 到 `U+DFFF` 也不能表示 Unicode 标量值。因此，32 位整数只是方便的内存表示，并不意味着全部数值都合法。
 
-虽然有了Unicode，但如果把所有文字都用`uint32_t`（4字节）存储会比较低效：
+虽然有了 Unicode，但如果把所有文字都用 `uint32_t`（4 字节）存储会比较低效：
 
-1. **存储效率问题**：英文字符在互联网上出现频率很高，但只需要7位就能表示，用4字节存储浪费了75%的空间
-2. **向后兼容**：需要兼容Unicode之前的ASCII标准（用1字节表达拉丁文字符）
+1. **存储效率问题**：ASCII 字符只需要 7 位，用 4 字节存储会浪费大量空间
+2. **向后兼容**：需要兼容 Unicode 之前的 ASCII 标准
 3. **网络传输**：更少的字节意味着更快的传输速度
 
-因此设计了UTF-8（8-bit Unicode Transformation Format），它是一种**变长编码**：出现频率高的字符用更少的字节表示，最多能节省75%的存储空间。
+UTF-8（8-bit Unicode Transformation Format）使用 1 到 4 个字节编码一个 Unicode 标量值。ASCII 码点仍只占一个字节，并且编码结果与原有 ASCII 字节完全一致；更大的码点使用更多字节。
 
 ## UTF-8
 
-UTF-8使用1到4个字节的变长方式来表达Unicode字符。为了解码时不发生混乱，制定了严格的格式约束，编码格式：
+UTF-8 使用 1 到 4 个字节表示一个 Unicode 标量值。首字节决定序列长度，后续字节统一以 `10` 开头：
 
 ```
 1字节：0xxxxxxx
@@ -29,7 +29,7 @@ UTF-8使用1到4个字节的变长方式来表达Unicode字符。为了解码时
 4字节：11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
 ```
 
-解码规则，从UTF-8字节序列提取Unicode值时，只需要取出所有的x位并拼接：
+解码时只需从 UTF-8 字节序列中取出所有 `x` 位，并按顺序拼接为 Unicode 码点：
 
 ```
 1字节：0xxxxxxx → xxxxxxx
@@ -37,18 +37,19 @@ UTF-8使用1到4个字节的变长方式来表达Unicode字符。为了解码时
 3字节：1110xxxx 10xxxxxx 10xxxxxx → xxxx xxxxxx xxxxxx  
 4字节：11110xxx 10xxxxxx 10xxxxxx 10xxxxxx → xxx xxxxxx xxxxxx xxxxxx
 ```
-容量分配：
-- **1字节**：7位 → 128种字符（0-127）- ASCII兼容
-- **2字节**：5+6=11位 → 2048种字符（128-2047）
-- **3字节**：4+6+6=16位 → 65536种字符（2048-65535）
-- **4字节**：3+6+6+6=21位 → 2097152种字符（65536-1114111）
+对应的合法码点范围为：
+
+- **1 字节**：`U+0000`～`U+007F`
+- **2 字节**：`U+0080`～`U+07FF`
+- **3 字节**：`U+0800`～`U+FFFF`，排除代理项
+- **4 字节**：`U+10000`～`U+10FFFF`
 
 ## C++ 实现
 
-**函数1**：IsTrailByte - 判断续字节
+**函数 1：IsTrailByte**
 
 
-首先实现一个函数来判断一个字节是不是UTF-8的续字节。从上面的编码规则可以看到，当字符长度>1字节时，后续的字节都以10开头。
+续字节的最高两位必须是 `10`：
 
 ```cpp
 bool IsTrailByte(uint8_t x) {
@@ -57,85 +58,66 @@ bool IsTrailByte(uint8_t x) {
 ```
 
 **实现原理**
-- `0xC0`（11000000）作为掩码，提取字节的最高2位
+- `0xC0`（11000000）作为掩码，提取字节的最高 2 位
 - `0x80`（10000000）是续字节的标准模式
-- 通过位与操作`&`提取高2位，然后与`0x80`比较
+- 通过位与操作 `&` 提取最高 2 位，然后与 `0x80` 比较
 
-这个函数能准确识别所有64种续字节（0x80-0xBF）。  // 0x80: 10000000, 0xBF: 10111111
+它可以识别 `0x80`～`0xBF` 范围内的 64 个续字节。
 
-**函数2**：DecodeOneUTF8 - 解码单个字符
+**函数 2：DecodeOneUTF8**
 
-接下来实现UTF-8解码的核心函数，它从字符串开头解码一个UTF-8字符：
+解码不仅要检查字节前缀，还要拒绝过长编码、代理项和超过 `U+10FFFF` 的结果。非法序列返回替换字符 `U+FFFD`，并消费一个字节，使调用方可以继续处理后续输入：
 
 ```cpp
-uint32_t DecodeOneUTF8(const std::string& str, size_t* bytes) {
-    if (str.empty()) {
+uint32_t DecodeOneUTF8(const char* begin, const char* end, size_t* bytes) {
+    constexpr uint32_t kError = 0xFFFD;
+    const size_t len = end - begin;
+    if (len == 0) {
         *bytes = 0;
-        return 0;
+        return kError;
     }
-    
-    const uint8_t* data = reinterpret_cast<const uint8_t*>(str.data());
-    const size_t size = str.size();
-    
-    // 1字节：0xxxxxxx
-    if (data[0] < 0x80) {  // 0x80: 10000000
+
+    const auto* data = reinterpret_cast<const uint8_t*>(begin);
+    uint32_t cp = 0;
+    size_t width = 0;
+    uint32_t minimum = 0;
+
+    if (data[0] < 0x80) {
         *bytes = 1;
         return data[0];
+    } else if ((data[0] & 0xE0) == 0xC0) {
+        width = 2; minimum = 0x80; cp = data[0] & 0x1F;
+    } else if ((data[0] & 0xF0) == 0xE0) {
+        width = 3; minimum = 0x800; cp = data[0] & 0x0F;
+    } else if ((data[0] & 0xF8) == 0xF0) {
+        width = 4; minimum = 0x10000; cp = data[0] & 0x07;
     }
-    
-    // 2字节：110xxxxx 10xxxxxx
-    else if ((data[0] & 0xE0) == 0xC0 && size >= 2 &&  // 0xE0: 11100000, 0xC0: 11000000
-             IsTrailByte(data[1])) {
-        const uint32_t codepoint = ((data[0] & 0x1F) << 6) |  // 0x1F: 00011111
-                                   (data[1] & 0x3F);          // 0x3F: 00111111
-        *bytes = 2;
-        return codepoint;
+
+    if (width != 0 && len >= width) {
+        for (size_t i = 1; i < width; ++i) {
+            if (!IsTrailByte(data[i])) {
+                width = 0;
+                break;
+            }
+            cp = (cp << 6) | (data[i] & 0x3F);
+        }
+        const bool surrogate = cp >= 0xD800 && cp <= 0xDFFF;
+        if (width != 0 && cp >= minimum && cp <= 0x10FFFF && !surrogate) {
+            *bytes = width;
+            return cp;
+        }
     }
-    
-    // 3字节：1110xxxx 10xxxxxx 10xxxxxx
-    else if ((data[0] & 0xF0) == 0xE0 && size >= 3 &&  // 0xF0: 11110000, 0xE0: 11100000
-             IsTrailByte(data[1]) && IsTrailByte(data[2])) {
-        const uint32_t codepoint = ((data[0] & 0x0F) << 12) |  // 0x0F: 00001111
-                                   ((data[1] & 0x3F) << 6) |   // 0x3F: 00111111
-                                   (data[2] & 0x3F);           // 0x3F: 00111111
-        *bytes = 3;
-        return codepoint;
-    }
-    
-    // 4字节：11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
-    else if ((data[0] & 0xF8) == 0xF0 && size >= 4 &&  // 0xF8: 11111000, 0xF0: 11110000
-             IsTrailByte(data[1]) && IsTrailByte(data[2]) && IsTrailByte(data[3])) {
-        const uint32_t codepoint = ((data[0] & 0x07) << 18) |  // 0x07: 00000111
-                                   ((data[1] & 0x3F) << 12) |  // 0x3F: 00111111
-                                   ((data[2] & 0x3F) << 6) |   // 0x3F: 00111111
-                                   (data[3] & 0x3F);           // 0x3F: 00111111
-        *bytes = 4;
-        return codepoint;
-    }
-    
-    // 异常情况
-    *bytes = 0;
-    return 0;
+
+    *bytes = 1;
+    return kError;
 }
 ```
 
-**实现原理**
+`minimum` 是当前字节数可以表示的最小码点，用来排除本可用更短序列表示的过长编码。循环则逐个验证续字节，并通过左移 6 位还原码点。
 
-以2字节情况为例说明关键技术：
+**函数 3：DecodeUTF8**
 
-1. **格式验证**：`(data[0] & 0xE0) == 0xC0` 检查首字节前3位是否为110  // 0xE0: 11100000, 0xC0: 11000000
-2. **续字节验证**：使用`IsTrailByte`确保后续字节格式正确
-3. **数据提取**：
-   - `data[0] & 0x1F`：提取首字节的低5位数据（掩码00011111）  // 0x1F: 00011111
-   - `data[1] & 0x3F`：提取续字节的低6位数据（掩码00111111）   // 0x3F: 00111111
-4. **位组合**：`(首字节数据 << 6) | 续字节数据` 将5位和6位数据拼接
-
-3字节和4字节的处理逻辑类似，只是掩码和移位数不同。
-
-
-**函数3**：DecodeUTF8 - 解码整个字符串
-
-基于`DecodeOneUTF8`，我们可以实现解码整个UTF-8字符串的函数：
+基于 `DecodeOneUTF8`，可以实现整个 UTF-8 字符串的解码：
 
 ```cpp
 std::vector<uint32_t> DecodeUTF8(const std::string& str) {
@@ -145,12 +127,8 @@ std::vector<uint32_t> DecodeUTF8(const std::string& str) {
     while (pos < str.size()) {
         size_t bytes_consumed;
         
-        std::string substr = str.substr(pos);
-        uint32_t codepoint = DecodeOneUTF8(substr, &bytes_consumed);
-        
-        if (bytes_consumed == 0) {
-            break;  // 遇到无法解码的序列，停止处理
-        }
+        uint32_t codepoint = DecodeOneUTF8(
+            str.data() + pos, str.data() + str.size(), &bytes_consumed);
         
         codepoints.push_back(codepoint);
         pos += bytes_consumed;
@@ -160,15 +138,20 @@ std::vector<uint32_t> DecodeUTF8(const std::string& str) {
 }
 ```
 
-这个函数通过循环调用`DecodeOneUTF8`，逐个字符解码整个字符串，最终返回Unicode码点数组。
+这个函数循环调用 `DecodeOneUTF8`，最终返回 Unicode 码点数组。非法输入会以替换字符保留在结果中，而不会截断整个字符串。
 
 
-**函数4**：EncodeOneUTF8 - 编码单个字符
+**函数 4：EncodeOneUTF8**
 
-编码函数基本上是解码的镜像操作，将Unicode码点转换为UTF-8字节序列：
+编码是解码的镜像操作，将 Unicode 码点转换为 UTF-8 字节序列：
 
 ```cpp
 size_t EncodeOneUTF8(uint32_t c, char* output) {
+    constexpr uint32_t kError = 0xFFFD;
+    if (c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) {
+        c = kError;
+    }
+
     if (c <= 0x7F) {  // 0x7F: 01111111
         // 1字节：0xxxxxxx
         *output = static_cast<char>(c);
@@ -204,22 +187,22 @@ size_t EncodeOneUTF8(uint32_t c, char* output) {
 
 **实现原理**
 
-编码采用"从低位到高位，倒序构建"的策略：
+编码采用“从低位到高位，倒序构建”的策略：
 
-1. **数据分解**：用`c & 0x3F`提取低6位，然后右移6位处理下一组  // 0x3F: 00111111
-2. **格式添加**：用`0x80 | 数据`给续字节添加10前缀  // 0x80: 10000000
+1. **数据分解**：用 `c & 0x3F` 提取低 6 位，然后右移 6 位处理下一组
+2. **格式添加**：用 `0x80 | 数据` 给续字节添加 `10` 前缀
 3. **倒序填充**：从最后一个字节开始向前填充，自然处理变长编码
 
-**函数5**：EncodeUTF8 - 编码整个码点数组
+**函数 5：EncodeUTF8**
 
-最后实现将Unicode码点数组编码为UTF-8字符串的函数：
+最后将 Unicode 码点数组编码为 UTF-8 字符串：
 
 ```cpp
 std::string EncodeUTF8(const std::vector<uint32_t>& codepoints) {
     std::string result;
     
     for (uint32_t cp : codepoints) {
-        char buffer[4];  // UTF-8最多需要4个字节
+        char buffer[4];  // UTF-8 最多需要 4 个字节
         size_t bytes = EncodeOneUTF8(cp, buffer);
         
         result.append(buffer, bytes);
@@ -229,6 +212,8 @@ std::string EncodeUTF8(const std::vector<uint32_t>& codepoints) {
 }
 ```
 
-这个函数遍历码点数组，逐个编码后拼接成完整的UTF-8字符串。
+这个函数遍历码点数组，逐个编码后拼接成完整的 UTF-8 字符串。
 
+完成编码与解码之后，后续算法就可以在码点层面处理字符，而把字节边界留在输入输出层。下一篇将以此为基础，实现能够正确处理 UTF-8 文本的正则表达式引擎。
 
+配套实现：[Ismantic/Ustr](https://github.com/Ismantic/Ustr)

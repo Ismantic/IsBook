@@ -1,7 +1,7 @@
-# DoubleArray Trie
+# Double-Array Trie
 
 ## 概述
-DoubleArrayTrie 是一种高校的字典树 (Trie) 压缩表示方法，通过巧妙的数组布局和状态转移机制，实现了空间高效且访问快速的字符串检索数据结构。其被广泛的应用了字符串的检索上，称之为自然语言处理领域最核心的数据结构也不为过。
+Double-Array Trie 是一种高效的 Trie 压缩表示。它通过数组布局和状态转移减少指针开销，兼顾紧凑存储与快速字符串检索，常用于词典匹配、形态分析和分词。
 
 以存储单词 {"he", "she", "his"} 为例，朴素指针字典树结构如下：
 
@@ -25,8 +25,8 @@ $(4) s(5)  e(9)
 - 内存分散，缓存不友好
 - 指针访问增加间接寻址开销
 
-通过改用双数组表达能解决以上问题，双数组的本质是把树"平铺"到一维数组中：
-- **state**：存储节点的"基地址"
+Double-Array Trie 把树平铺到一维数组中：
+- **state**：保存计算子节点位置所需的状态值
 - **character**：存储字符信息
 - **up**：验证父子关系的正确性
 
@@ -50,10 +50,7 @@ array[new_pos].up = pos
 array[new_pos].character = ct
 ```
 
-由状态转移关系，pos 和 new_pos 的两个节点就能联系起来，就可以设计算法把整个树平铺到数组上。
-
-
-状态转移用到了 XOR 操作，以下做简单介绍。
+状态转移把父节点位置、状态值和输入字节组合起来，由此可以把整棵 Trie 平铺到数组中。这里用到 XOR 的以下性质：
 
 **性质1：交换律**
 
@@ -67,7 +64,7 @@ a ^ b = b ^ a
 (a ^ b) ^ c = a ^ (b ^ c)
 ```
 
-**性质3：自反性**
+**性质3：自消性**
 
 ```
 a ^ a = 0
@@ -80,7 +77,7 @@ a ^ 0 = a
 如果 c = a ^ b，那么 a = c ^ b，b = c ^ a
 ```
 
-接下来把通过把前面的例子 {he, his, she} 用数组方式存储做详细阐述。首先再说明下状态转移公式：
+下面把 `{he, his, she}` 平铺到数组中。状态转移公式为：
 
 ```cpp
 uint32_t next_pos = pos ^ state ^ ct;
@@ -91,7 +88,6 @@ uint32_t next_pos = pos ^ state ^ ct;
 
 ```
 next_pos = 5 ^ 12 ^ 97
-         = 5 ^ 12 ^ 97
          = 104
 ```
 
@@ -104,7 +100,13 @@ if (array_[next_pos].character != ct) return false;
 if (array_[next_pos].up != pos) return false;
 ```
 
-其次，需要注意的是state的取值，要设计一个GetFreeIndex函数，其能返回一个能满足存储当前节点的孩子节点的位置，得到该位置之后，假设当前位置为pos,返回的为index,那么 state = pos ^ index。
+`state` 由基址分配过程确定。`GetFreeIndex` 为当前节点的一组子节点寻找可用基址 `index`，再令 `state = pos ^ index`。查询时有：
+
+```text
+pos ^ state ^ ct
+= pos ^ pos ^ index ^ ct
+= index ^ ct
+```
 
 
 **完整示例：** 对前面的 {he, his, she} 的例子，建好的数组如下表显示（eow表示是否词结束）：
@@ -173,35 +175,35 @@ GetFreeIndex找到: index = 40
 sh节点state: 124 ^ 40 = 84
 ```
 
-注意，以上构建的过程中子节点位置的计算，用的是 new_pos = index ^ ct，而前面说的状态转移过程，new_pos = pos ^ state ^ ct，其实这两者是等价的，state = pos ^ index，因而 pos ^ state ^ ct = pos ^ pos ^ index ^ ct = 0 ^ index ^ ct = index ^ ct。这也是巧妙利用 XOR 性质的地方。
+因此，构建时使用的 `new_pos = index ^ ct` 与查询时使用的 `new_pos = pos ^ state ^ ct` 完全等价。构建过程只需保存 `state`，查询过程就能恢复同一个基址。
 
-其实到这里，已经基本上能把DoubleArray创建的方法说的差不多了，就是不断的找到GetFreeIndex,分配给子节点，再对子节点迭代下去，直到把Trie树遍历完。
+至此，Double-Array Trie 的构建过程已经清楚：为一组子节点寻找可用的基址，将它们写入数组，再递归处理子节点，直到遍历完整棵 Trie。
 
 ## 实现
 
-DoubleArrayTrie的核心实现思路：
+Double-Array Trie 的核心实现思路：
 
-1. 通过XOR运算实现状态转移（pos^state^ct）
-2. 通过up字段验证父子关系
-3. 叶子节点复用state字段存储值(value)
+1. 通过 XOR 实现状态转移（`pos ^ state ^ ct`）
+2. 通过 `up` 验证父子关系
+3. 值节点复用 `state` 字段存储 `value`
 
 
 **构建过程**
 ```
-朴素Trie → 递归平铺 → 双数组结构
+朴素 Trie → 递归平铺 → 双数组结构
 ```
 
 1. 初始化根节点（pos=0）
 2. 对每个节点的子节点集合：
-   - 调用GetFreeIndex寻找合适基址
+   - 调用 `GetFreeIndex` 寻找合适基址
    - 计算所有子节点位置（index ^ char）
-   - 设置父子互指关系（up字段）
+   - 设置父子关系（`up` 字段）
 3. 递归处理每个子节点
 
 
 **数据结构**
 
-Node 是数组中的基本单元，注意state和value用了union，这是因为叶子节点用不上state,这样就可以把空间给value用了。还有就是eow，对一个字符串"abc"，其实eow会设置两次，一是会把字符串延长成"abc\0"，二是会对c和\0都设置eow，叶子节点的时候value是有值的，此时会满足character == 0 和 eow == true.
+`Node` 是数组中的基本单元。中间节点需要 `state` 完成状态转移，值节点不再需要它，因此两者通过 `union` 复用空间。插入 `"abc"` 时，构建过程会追加终止字节 `'\0'`：字符 `c` 标记原词结束，随后创建满足 `character == 0 && eow` 的值节点，并在其中保存 `value`。
 
 
 ```cpp
@@ -326,7 +328,7 @@ void NodeConvert(TrieNode* node, uint32_t pos) {
 ```
 
 
-注意，对 '\0' 的处理，递归处理子节点的时候不会对这个节点做处理，因为其不存在子节点，而 SetupDownNodes 的时候会对 '\0' 创建 value 节点。
+`'\0'` 节点没有子节点，因此递归构建不会继续深入；它在 `SetupDownNodes` 中被直接写成值节点。
 
 **具体示例**
 
@@ -615,25 +617,25 @@ void CollectDownPieces(uint32_t pos, std::string& cw,
 ```
 
 
-**Index分配方法**
+**基址分配**
 
 
-`GetFreeIndex` 是 DoubleArray 实现中最核心的算法，它负责为每个节点的子节点集合分配一个合适的基址（index），确保所有子节点位置不冲突。这个算法的效率直接决定了 DoubleArray 的空间利用率和构建速度。
+`GetFreeIndex` 为一组子节点分配基址 `index`，确保所有 `index ^ byte` 位置均未被占用。它的搜索效率会直接影响 Double-Array Trie 的构建速度和空间利用率。
 
 **基本要求**
 
-给定一个字符集合 `{c1, c2, ..., cn}`，需要找到一个 `index`，使得：
+给定互不相同的字节集合 `{c1, c2, ..., cn}`，需要找到一个 `index`，使得：
 - 所有位置 `index ^ c1, index ^ c2, ..., index ^ cn` 都未被占用
-- 这些位置互不相同
-- index 尽可能小，以提高空间局部性
+- 尽量从上次分配位置附近找到结果，以改善空间局部性
+
+对固定的 `index`，XOR 是一一映射，因此不同字节天然会得到不同位置，不需要额外检查相互冲突。
 
 **数学表达**
 
 ```cpp
 对于字符集合 es = {e1, e2, ..., en}
-找到最小的 index，满足：
-∀i,j ∈ [1,n], i≠j => (index ^ ei) ≠ (index ^ ej)
-且 ∀i ∈ [1,n] => uses[index ^ ei] == false
+找到一个 index，满足：
+∀i ∈ [1,n] => uses[index ^ ei] == false
 ```
 
 **具体实现**
@@ -673,7 +675,7 @@ uint32_t GetFreeIndex(const std::vector<uint8_t>& es) {
 }
 ```
 
-该函数本质上就是个线性探测法，由上次分配的位置附近继续向前探测，虽然实现的比较简单，但鉴于1）XOR较为分散的性质；2）一次性会把全组子节点都传过来；实际上的性能也是能接受的，更复杂的算法也存在，能把构建的过程更快一些。以及每一次Index分配，子节点占用的空间其实不会超过Index+256，也不会小于Index-256。
+该函数采用线性探测，从上次分配位置附近开始，逐个检查整组子节点需要的位置。一个字节的取值范围是 0～255，因此 `index ^ byte` 始终位于与 `index` 相邻的 256 个位置范围内。这个简单策略通常能够获得可接受的局部性；更复杂的空闲区间索引可以进一步缩短构建时间。
 
 
 **输入**：`es = {'a'(97), 'e'(101), 'i'(105), 'o'(111), 'u'(117)}`
@@ -692,6 +694,6 @@ uint32_t GetFreeIndex(const std::vector<uint8_t>& es) {
   → 返回 index=10
 ```
 
+Double-Array Trie 以较高的构建成本换取紧凑、稳定的查询结构，适合词表构建完成后频繁执行前缀匹配。后面的中文分词会直接利用这种能力；下一篇则先介绍更适合动态更新的 Critbit Trie。
 
-
-
+配套实现：[Ismantic/Trie](https://github.com/Ismantic/Trie)

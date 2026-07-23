@@ -18,7 +18,7 @@
 
 正则语言的局限来自有限状态机只有有限记忆：它不能保存无界计数或任意深度的栈，因而无法识别任意层数的括号嵌套。这是语言表达能力的限制，与具体匹配程序是否回溯无关。
 
-接下来介绍两种实现。Matcher 对应 `src/naive_regex.cc`，用递归回溯直接匹配；Compiler 对应 `src/regex.cc`，将正则表达式编译成有限状态机，是本篇的重点。
+接下来介绍两种实现。Matcher 对应 `src/regex-0.cc`，用递归回溯直接匹配；Compiler 对应 `src/regex-1.cc`，将正则表达式编译成有限状态机，是本篇的重点。
 
 ## Matcher
 当对匹配效率要求不高以及语法比较简单的时候，可以先从**匹配**这个层面入手，快速实现一个正则引擎。
@@ -350,7 +350,7 @@ do {
 
 以下实现的正则表达式语法支持以下操作：
 
-```BNF
+```bnf
 <Pattern>    ::= <Sequence> ('|' <Sequence>)*
 <Sequence>   ::= <Element>*
 <Element>    ::= <Atom> <Quantifier>?
@@ -358,64 +358,6 @@ do {
 <Quantifier> ::= '*' | '+' | '?'
 <Literal>    ::= UTF-8字符（除了特殊字符）
 ```
-
-**语法详解**
-
-**Pattern层（模式层）**
-```BNF
-<Pattern> ::= <Sequence> ('|' <Sequence>)*
-```
-
-- **含义**：模式是由`|`分隔的一个或多个序列的选择
-- **示例**：
-  - `a|b` → 匹配字符`a`或`b`
-  - `hello|world|regex` → 匹配三个单词中的任意一个
-
-**Sequence层（序列层）**
-```BNF
-<Sequence> ::= <Element>*
-```
-
-- **含义**：序列是零个或多个元素的连接
-- **示例**：
-  - `abc` → 三个字符的序列
-  - `a*b+` → 量词修饰的原子序列
-  - 空序列 → 匹配空字符串
-
-**Element层（元素层）**
-```BNF
-<Element> ::= <Atom> <Quantifier>?
-```
-
-- **含义**：元素是一个原子可选地跟随一个量词
-- **示例**：
-  - `a` → 原子，无量词
-  - `a*` → 原子后跟星号量词
-  - `(ab)+` → 组合原子后跟加号量词
-
-
-**Atom层（原子层）**
-```BNF
-<Atom> ::= <Literal> | '.' | '(' <Pattern> ')'
-```
-
-- **含义**：原子是最基本的匹配单元
-- **示例**：
-  - `a` → 字面量字符
-  - `.` → 通配符，匹配任意字符
-  - `(a|b)` → 括号分组，包含子模式
-
-
-**Quantifier层（量词层）**
-```BNF
-<Quantifier> ::= '*' | '+' | '?'
-```
-
-- **含义**：量词修饰原子的重复次数
-- **说明**：
-  - `*` → 零次或多次
-  - `+` → 一次或多次  
-  - `?` → 零次或一次
 
 **语法特性**
 
@@ -433,46 +375,15 @@ do {
 - `a|bc` → `a|(bc)` 而不是 `(a|b)c`
 - `a|b|c` → `((a|b)|c)` 左结合
 
-**递归结构**
-
-语法中存在递归定义：
-- `<Pattern>` 在 `<Atom>` 的括号表达式中出现
-- 这使得可以构建任意深度的嵌套表达式
-
-**示例**：`((a|b)*c)+` 的解析树：
-
-```
-<Pattern>
-└── <Sequence>
-    └── <Element>
-        ├── <Atom>: '(' <Pattern> ')'
-        │   └── <Pattern>
-        │       └── <Sequence>
-        │           ├── <Element>
-        │           │   ├── <Atom>: '(' <Pattern> ')'
-        │           │   │   └── <Pattern>: a|b
-        │           │   └── <Quantifier>: '*'
-        │           └── <Element>
-        │               └── <Atom>: 'c'
-        └── <Quantifier>: '+'
-```
-
-
-
 **递归下降解析器**
 
-**递归下降解析**是一种自顶向下的语法分析技术，其核心思想是：
-
-1. **每个非终结符对应一个解析函数**
-2. **函数调用模拟语法规则的推导**
-3. **递归处理体现语法的递归结构**
-4. **回溯处理选择和可选元素**
+递归下降解析是一种自顶向下的语法分析方法。每个非终结符对应一个解析函数，函数调用关系直接反映文法层次；`Atom` 遇到括号时再次调用 `ParsePattern`，因而能够处理嵌套表达式。本实现的文法不需要回溯。
 
 **实现详解**
 
 `RegexParser`类包含以下核心组件：
 
-```Cpp
+```cpp
 class RegexParser {
 private:
     std::string pattern;    // 待解析的正则表达式
@@ -494,7 +405,7 @@ private:
 
 **ParsePattern函数 - 处理选择操作**
 
-```Cpp
+```cpp
 std::unique_ptr<Ast> ParsePattern() {
     PrintEnter("ParsePattern", "<sequence> ('|' <sequence>)*");
 
@@ -524,22 +435,9 @@ std::unique_ptr<Ast> ParsePattern() {
 3. **循环处理多个分支**：使用while循环处理所有`|`分隔的序列
 4. **位置管理**：每次遇到`|`时递增`pos`以消耗该字符
 
-**解析示例** - `a|b|c`：
-
-```
-初始: pos=0, pattern="a|b|c"
-1. ParseSequence() → 解析"a", pos=1
-2. 发现pattern[1]='|' → 消耗'|', pos=2
-3. ParseSequence() → 解析"b", pos=3  
-4. 发现pattern[3]='|' → 消耗'|', pos=4
-5. ParseSequence() → 解析"c", pos=5
-6. pos=5 >= length=5 → 结束
-```
-
-
 **ParseSequence函数 - 处理连接操作**
 
-```Cpp
+```cpp
 std::unique_ptr<Ast> ParseSequence() {
     PrintEnter("ParseSequence", "<element>*");
 
@@ -565,20 +463,9 @@ std::unique_ptr<Ast> ParseSequence() {
 
 这些条件确保了序列解析在适当的边界停止，不会越界处理属于上层语法结构的字符。
 
-**解析示例** - `"abc"`：
-
-```
-初始: pos=0, pattern="abc"
-1. ParseElement() → 解析'a', pos=1
-2. ParseElement() → 解析'b', pos=2
-3. ParseElement() → 解析'c', pos=3
-4. pos=3 >= length=3 → 结束
-结果: SequenceAst包含三个LiteralAst节点
-```
-
 **ParseElement函数 - 处理量词**
 
-```Cpp
+```cpp
 std::unique_ptr<Ast> ParseElement() {
     PrintEnter("ParseElement", "<atom> <quantifier>?");
 
@@ -622,20 +509,9 @@ std::unique_ptr<Ast> ParseElement() {
 3. **包装创建**：根据量词类型创建相应的包装节点
 4. **位置递进**：消耗量词字符并更新位置
 
-**解析示例** - `"a*"`：
-
-```
-初始: pos=0, pattern="a*"
-1. ParseAtom() → 解析'a', pos=1, 返回LiteralAst('a')
-2. pattern[1]='*' → 检测到星号量词
-3. 创建StarAst节点，包装LiteralAst('a')
-4. pos递增到2
-结果: StarAst(LiteralAst('a'))
-```
-
 **ParseAtom函数 - 处理基本单元**
 
-```Cpp
+```cpp
 std::unique_ptr<Ast> ParseAtom() {
     PrintEnter("ParseAtom", "<literal> | '.' | '(' <pattern> ')'");
 
@@ -750,7 +626,7 @@ SequenceAst
 
 正则表达式AST包含以下节点类型：
 
-```Cpp
+```cpp
 enum class AstType {
     Empty,        // 空表达式 ε
     Literal,      // 字面量字符
@@ -765,7 +641,7 @@ enum class AstType {
 
 **基础类**
 
-```Cpp
+```cpp
 class Ast {
 public:
     virtual ~Ast() = default;
@@ -778,7 +654,7 @@ public:
 
 **空节点** - 表示空字符串：
 
-```Cpp
+```cpp
 class EmptyAst : public Ast {
 public:
     AstType GetType() const override { return AstType::Empty; }
@@ -788,7 +664,7 @@ public:
 
 **字面量节点** - 表示具体字符：
 
-```Cpp
+```cpp
 class LiteralAst : public Ast {
 private:
     uint32_t point;  // Unicode码点
@@ -804,7 +680,7 @@ public:
 
 **通配符节点** - 表示点操作符：
 
-```Cpp
+```cpp
 class DotAst : public Ast {
 public:
     AstType GetType() const override { return AstType::Dot; }
@@ -816,7 +692,7 @@ public:
 
 **序列节点** - 表示元素连接：
 
-```Cpp
+```cpp
 class SequenceAst : public Ast {
 private:
     std::vector<std::unique_ptr<Ast>> elements;
@@ -837,7 +713,7 @@ public:
 
 **选择节点** - 表示或操作：
 
-```Cpp
+```cpp
 class AlternativeAst : public Ast {
 private:
     std::vector<std::unique_ptr<Ast>> branches;  // 注意：原代码中变量名有拼写错误
@@ -858,7 +734,7 @@ public:
 
 **量词节点** - 表示重复操作：
 
-```Cpp
+```cpp
 // 星号量词 (0或多次)
 class StarAst : public Ast {
 private:
@@ -883,7 +759,7 @@ public:
 
 **1. 访问者接口**：
 
-```Cpp
+```cpp
 class AstVisitor {
 public:
     virtual ~AstVisitor() = default;
@@ -900,7 +776,7 @@ public:
 
 **2. 可访问接口**：
 
-```Cpp
+```cpp
 // 在每个AST节点中
 virtual void Accept(AstVisitor* visitor) const = 0;
 
@@ -910,219 +786,7 @@ void Accept(AstVisitor* v) const override {
 }
 ```
 
-**访问者模式的好处**
-
-1. **开闭原则**：可以添加新操作而不修改AST节点类
-2. **单一职责**：每个访问者专注于一种操作
-3. **类型安全**：编译时确定调用哪个Visit方法
-4. **集中化**：相关操作集中在一个访问者类中
-
-**Printer**
-
-通过`RegexPrinter`类来深入理解访问者模式的应用：
-
-```Cpp
-class RegexPrinter : public AstVisitor {
-private:
-    int cnt = 0;  // 缩进计数器
-
-    void PrintIndent() {
-        for (int i = 0; i < cnt; ++i) {
-            std::cout << " ";
-        }
-    }
-
-public:
-    // 访问叶子节点
-    void Visit(const EmptyAst* node) override {
-        PrintIndent();
-        std::cout << "Empty\n";
-    }
-
-    void Visit(const LiteralAst* node) override {
-        PrintIndent();
-        uint32_t p = node->GetPoint();
-        std::string c = EncodeUTF8(p);  // 将Unicode码点转换为UTF-8字符串
-        std::cout << "Literal('" << c << "', U+" 
-                  << std::hex << p << std::dec << ")\n";
-    }
-
-    void Visit(const DotAst* node) override {
-        PrintIndent();
-        std::cout << "Dot(.)\n";
-    }
-
-    // 访问复合节点 - 递归处理子节点
-    void Visit(const SequenceAst* node) override {
-        PrintIndent();
-        std::cout << "Sequence\n";
-        cnt++;  // 增加缩进
-        for (const auto& e : node->GetElements()) {
-            e->Accept(this);  // 递归访问每个子元素
-        }
-        cnt--;  // 恢复缩进
-    }
-
-    void Visit(const AlternativeAst* node) override {
-        PrintIndent();
-        std::cout << "Alternative\n";
-        cnt++;
-        for (const auto& branch : node->GetBranches()) {
-            branch->Accept(this);  // 递归访问每个分支
-        }
-        cnt--;
-    }
-
-    // 访问量词节点
-    void Visit(const StarAst* node) override {
-        PrintIndent();
-        std::cout << "Star\n";
-        cnt++;
-        node->GetElement()->Accept(this);  // 递归访问被量词修饰的元素
-        cnt--;
-    }
-    
-    // PlusAst和OptionalAst的实现类似...
-};
-```
-
-**示例**
-
-对于正则表达式`"(a|b)*c"`，打印器会产生以下输出：
-
-```
-Sequence
- Star
-  Alternative
-   Literal('a', U+61)
-   Literal('b', U+62)
- Literal('c', U+63)
-```
-
-这个树状结构清晰地展示了：
-1. 整体是一个序列（连接）
-2. 第一个元素是星号量词
-3. 星号修饰的是一个选择（a或b）
-4. 第二个元素是字面量字符c
-
-**执行流程**
-
-跟踪`"a*"`的打印过程：
-
-```Cpp
-// 1. 从根节点开始
-StarAst* root = ...;  // 解析得到的AST根节点
-RegexPrinter printer;
-root->Accept(&printer);
-
-// 2. StarAst的Accept方法被调用
-void StarAst::Accept(AstVisitor* v) const {
-    v->Visit(this);  // this是StarAst*类型
-}
-
-// 3. 由于this是StarAst*，调用Visit(const StarAst*)重载
-void RegexPrinter::Visit(const StarAst* node) {
-    PrintIndent();           // 打印缩进
-    std::cout << "Star\n";   // 打印节点类型
-    cnt++;                   // 增加缩进层级
-    
-    // 4. 递归访问子节点
-    node->GetElement()->Accept(this);  // 访问LiteralAst('a')
-    
-    cnt--;                   // 恢复缩进层级
-}
-
-// 5. LiteralAst的Accept方法被调用
-void LiteralAst::Accept(AstVisitor* v) const {
-    v->Visit(this);  // this是LiteralAst*类型
-}
-
-// 6. 调用Visit(const LiteralAst*)重载
-void RegexPrinter::Visit(const LiteralAst* node) {
-    PrintIndent();
-    uint32_t p = node->GetPoint();  // 获取Unicode码点 0x61
-    std::string c = EncodeUTF8(p);  // 转换为字符串 "a"
-    std::cout << "Literal('" << c << "', U+" 
-              << std::hex << p << std::dec << ")\n";
-}
-```
-
-**最终输出**：
-
-```
-Star
- Literal('a', U+61)
-```
-
-**其他应用**
-
-访问者模式为AST提供了强大的扩展性，可以轻松实现各种操作：
-
-**AST验证器**
-
-```Cpp
-class AstValidator : public AstVisitor {
-private:
-    bool valid = true;
-    std::string error_msg;
-
-public:
-    void Visit(const SequenceAst* node) override {
-        if (node->GetElements().empty()) {
-            // 空序列可以转换为EmptyAst
-            return;
-        }
-        for (const auto& element : node->GetElements()) {
-            element->Accept(this);
-            if (!valid) break;
-        }
-    }
-
-    void Visit(const AlternativeAst* node) override {
-        if (node->GetBranches().size() < 2) {
-            valid = false;
-            error_msg = "Alternative must have at least 2 branches";
-            return;
-        }
-        for (const auto& branch : node->GetBranches()) {
-            branch->Accept(this);
-            if (!valid) break;
-        }
-    }
-
-    bool IsValid() const { return valid; }
-    const std::string& GetError() const { return error_msg; }
-};
-```
-
-**AST大小计算器**
-
-```Cpp
-class AstSizeCalculator : public AstVisitor {
-private:
-    size_t total_nodes = 0;
-
-public:
-    void Visit(const EmptyAst* node) override { total_nodes++; }
-    void Visit(const LiteralAst* node) override { total_nodes++; }
-    void Visit(const DotAst* node) override { total_nodes++; }
-    
-    void Visit(const SequenceAst* node) override {
-        total_nodes++;
-        for (const auto& element : node->GetElements()) {
-            element->Accept(this);
-        }
-    }
-    
-    void Visit(const StarAst* node) override {
-        total_nodes++;
-        node->GetElement()->Accept(this);
-    }
-    
-    size_t GetTotalNodes() const { return total_nodes; }
-};
-```
-
+访问者把算法与节点数据分开：打印器可以输出树形结构，`NFABuilder` 则使用同一套 `Accept/Visit` 接口把各类节点转换成 NFA 片段。后续增加新的 AST 节点时，需要同时为相关访问者补充对应的 `Visit` 方法。
 
 **NFA**
 
@@ -1145,7 +809,7 @@ public:
 
 NFA状态类包含以下组件：
 
-```Cpp
+```cpp
 class NFAState {
 public:
     int i;                                              // 状态编号
@@ -1182,7 +846,7 @@ public:
 
 **片段结构**
 
-```Cpp
+```cpp
 struct NFA {
     NFAState* start;  // 起始状态
     NFAState* end;    // 结束状态
@@ -1263,7 +927,7 @@ C: [S3] --> [E3]
 [S1] --> [E1] --ε--> [S2] --> [E2] --ε--> [S3] --> [E3]
 ```
 
-```Cpp
+```cpp
 void Visit(const SequenceAst* node) override {
     const auto& elements = node->GetElements();
     if (elements.empty()) {
@@ -1304,7 +968,7 @@ B: [S2] --> [E2]
         --ε--> [S2] --> [E2] --ε--
 ```
 
-```Cpp
+```cpp
 void Visit(const AlternativeAst* node) override {
     const auto& branches = node->GetBranches();
     if (branches.empty()) {
@@ -1351,7 +1015,7 @@ void Visit(const AlternativeAst* node) override {
         -------ε----------->
 ```
 
-```Cpp
+```cpp
 void Visit(const StarAst* node) override {
     node->GetElement()->Accept(this);  // 构造内部表达式A的NFA
     auto inner = stack.top(); stack.pop();
@@ -1384,7 +1048,7 @@ void Visit(const StarAst* node) override {
                 ----ε-------
 ```
 
-```Cpp
+```cpp
 void Visit(const PlusAst* node) override {
     node->GetElement()->Accept(this);
     auto inner = stack.top(); stack.pop();
@@ -1417,7 +1081,7 @@ void Visit(const PlusAst* node) override {
        --------ε -------->----
 ```
 
-```Cpp
+```cpp
 void Visit(const OptionalAst* node) override {
     node->GetElement()->Accept(this);
     auto inner = stack.top(); stack.pop();
@@ -1492,77 +1156,6 @@ SequenceAst
 ```
 
 
-**PrintNFA**
-
-该实现包含了详细的NFA结构打印功能：
-
-```cpp
-void PrintNFA(const NFA& n) {
-    std::cout << "\n=== NFA Struct ===\n";
-    std::set<NFAState*> visited;
-    std::queue<NFAState*> queue;
-
-    queue.push(n.start);
-    visited.insert(n.start);
-
-    while (!queue.empty()) {
-        auto state = queue.front();
-        queue.pop();
-
-        std::cout << "State " << state->i;
-        if (state == n.start) std::cout << " (START)";
-        if (state->end) std::cout << " (END)";
-        std::cout << ":\n";
-
-        // 打印字符转换
-        for (const auto& [codepoint, targets] : state->transitions) {
-            for (auto target : targets) {
-                if (codepoint == NFAState::DOT_CHAR) {
-                    std::cout << "  --[.]-->";
-                } else if (codepoint <= 127 && codepoint >= 32) {
-                    std::cout << "  --'" << static_cast<char>(codepoint) << "'-->";
-                } else {
-                    std::cout << "  --U+" << std::hex << codepoint << std::dec << "-->";
-                }
-                std::cout << " State " << target->i << "\n";
-
-                if (visited.find(target) == visited.end()) {
-                    visited.insert(target);
-                    queue.push(target);
-                }
-            }
-        }
-
-        // 打印ε转换
-        for (auto target : state->e_transitions) {
-            std::cout << "  --ε--> State " << target->i << "\n";
-            if (visited.find(target) == visited.end()) {
-                visited.insert(target);
-                queue.push(target);
-            }
-        }
-    }
-}
-```
-
-对于正则表达式`"a*"`，输出：
-```
-=== NFA Struct ===
-State 0 (START):
-  --ε--> State 1
-  --ε--> State 3
-
-State 1:
-  --'a'--> State 2
-
-State 2:
-  --ε--> State 1
-  --ε--> State 3
-
-State 3 (END):
-```
-
-
 **DFA**
 
 **确定有限自动机**(Deterministic Finite Automation, DFA) 是NFA的确定性版本，具有以下特征：
@@ -1584,7 +1177,7 @@ State 3 (END):
 
 **状态设计**
 
-```Cpp
+```cpp
 class DFAState {
 public:
     int i;                                    // 状态编号
@@ -1612,7 +1205,7 @@ public:
 
 ε闭包是指从给定状态集合出发，通过任意数量的ε转换能够到达的所有状态集合。
 
-```Cpp
+```cpp
 void EpsilonClosure(std::set<NFAState*>& states) {
     std::stack<NFAState*> stack;
 
@@ -1653,7 +1246,7 @@ void EpsilonClosure(std::set<NFAState*>& states) {
 
 Move操作计算状态集合在给定输入字符下能够转换到的所有状态。
 
-```Cpp
+```cpp
 std::set<NFAState*> Move(const std::set<NFAState*>& states, uint32_t input) {
     std::set<NFAState*> result;
 
@@ -1683,7 +1276,7 @@ std::set<NFAState*> Move(const std::set<NFAState*>& states, uint32_t input) {
 
 **3. 接受状态检测**
 
-```Cpp
+```cpp
 bool ContainsEndState(const std::set<NFAState*>& states) {
     for (auto state : states) {
         if (state->end) return true;
@@ -1696,7 +1289,7 @@ bool ContainsEndState(const std::set<NFAState*>& states) {
 
 **主构造算法**
 
-```Cpp
+```cpp
 DFAState* Build(const NFA& nfa) {
     std::map<std::set<NFAState*>, DFAState*> state_map;  // NFA状态集合到DFA状态的映射
     std::queue<std::set<NFAState*>> queue;               // 待处理的状态集合队列
@@ -1821,58 +1414,12 @@ State 1 (END):
 - **State 1**：匹配了至少一个'a'后的状态，也是接受状态
 - **自循环**：State 1的自循环表示可以匹配任意多个'a'
 
-**示例：`(a|b)*c`**
-
-考虑一个更复杂的例子：
-
-**NFA结构（简化表示）**
-
-```
-Start --ε--> Choice --ε--> APath --'a'--> AEnd --ε--> Loop --ε--> AfterStar --'c'--> End
-             |                                        ^     |
-             |                                        |      v
-              --ε--> BPath --'b'--> BEnd --ε----------      CPath --'c'--> End
-                                                      |
-                                                       --ε--> End
-```
-
-**构建过程**
-
-**初始状态**：
-```
-NFA集合: {Start}
-ε闭包: {Start, Choice, APath, BPath, AfterStar, CPath}
-DFA State 0: 可以直接匹配'c'或者开始匹配'a'/'b'
-```
-
-**转换分析**：
-- **输入'a'**：到达能继续匹配'a'/'b'或匹配'c'的状态
-- **输入'b'**：类似于'a'的处理
-- **输入'c'**：到达接受状态
-
-**最终DFA**（简化）：
-```
-State 0 (START):
-  --'a'--> State 1
-  --'b'--> State 1  
-  --'c'--> State 2
-
-State 1:
-  --'a'--> State 1
-  --'b'--> State 1
-  --'c'--> State 2
-
-State 2 (END):
-```
-
-这个DFA清晰地表达了`(a|b)*c`的语义：匹配任意数量的'a'或'b'，最后以'c'结束。
-
 **匹配算法**
 
 
 DFA的匹配算法非常简单高效：
 
-```Cpp
+```cpp
 bool Match(DFAState* start, const std::string& text) {
     auto current = start;
     size_t pos = 0;
@@ -1885,14 +1432,21 @@ bool Match(DFAState* start, const std::string& text) {
             return false;  // 无效的UTF-8编码
         }
 
-        // 查找当前状态在该输入下的转换
+        // 优先使用精确转移，否则回退到通配符转移
         auto it = current->transitions.find(codepoint);
-        if (it == current->transitions.end()) {
-            return false;  // 没有对应的转换，匹配失败
+        if (it != current->transitions.end()) {
+            current = it->second;
+        } else if (codepoint != '\n' && codepoint != '\r') {
+            auto dot = current->transitions.find(NFAState::DOT_CHAR);
+            if (dot == current->transitions.end()) {
+                return false;
+            }
+            current = dot->second;
+        } else {
+            return false;
         }
 
-        current = it->second;  // 转换到下一个状态
-        pos += bytes;          // 移动到下一个字符
+        pos += bytes;
     }
 
     return current->end;  // 检查最终状态是否为接受状态
@@ -1911,7 +1465,7 @@ bool Match(DFAState* start, const std::string& text) {
 
 现在把全部组件整合到一个`Regex`类中：
 
-```Cpp
+```cpp
 class Regex {
 private:
     std::unique_ptr<Ast> ast;        // 抽象语法树
@@ -1981,103 +1535,6 @@ public:
       匹配结果
 ```
 
-**测试函数**
-
-```Cpp
-void test_regex(const std::string& pattern, const std::vector<std::string>& cases) {
-    try {
-        Regex regex(pattern);
-
-        std::cout << "\n=== Test Results ===\n";
-        for (const auto& text : cases) {
-            bool result = regex.Match(text);
-            std::cout << "\"" << text << "\" -> " 
-                      << (result ? "Match" : "Not Match") << "\n";
-        }
-
-        std::cout << "\n" << std::string(60, '=') << "\n";
-
-    } catch (const std::exception& e) {
-        std::cout << "Error: " << e.what() << "\n\n";
-    }
-}
-```
-
-**运行示例**
-
-**基础字符**
-
-```Cpp
-test_regex("a", {"a", "b", ""});
-```
-
-输出：
-```
-=== Compile Regex Pattern: "a" ===
-=== AST Structure ===
-Literal('a', U+61)
-
-=== AST -> NFA Conversion ===
-✓ AST -> NFA Conversion Done
-=== NFA Struct ===
-State 0 (START):
-  --'a'--> State 1
-State 1 (END):
-
-=== DFA Struct ===
-State 0 (START):
-  --'a'--> State 1
-State 1 (END):
-
-=== Test Results ===
-"a" -> Match
-"b" -> Not Match
-"" -> Not Match
-```
-
-**Unicode字符**
-
-```Cpp
-test_regex("你好", {"你好", "你", "好", "再见"});
-```
-
-输出：
-```
-=== AST Structure ===
-Sequence
- Literal('你', U+4f60)
- Literal('好', U+597d)
-
-=== Test Results ===
-"你好" -> Match
-"你" -> Not Match
-"好" -> Not Match
-"再见" -> Not Match
-```
-
-**复杂模式**
-
-```Cpp
-test_regex("(你|好)*", {"", "你", "好", "你好", "好你", "你你好好"});
-```
-
-输出：
-```
-=== AST Structure ===
-Star
- Alternative
-  Literal('你', U+4f60)
-  Literal('好', U+597d)
-
-=== Test Results ===
-"" -> Match
-"你" -> Match
-"好" -> Match
-"你好" -> Match
-"好你" -> Match
-"你你好好" -> Match
-```
-
 **性能分析**
 
 **编译时复杂度**
@@ -2097,26 +1554,10 @@ Star
 2. **NFA**：O(m)，Thompson构造法保证线性状态数
 3. **DFA**：O(2^m)，最坏情况下指数级
 
-**扩展示例**
-
-通过锚点支持来说明该怎么继续增加引擎的能力，添加行首(^)和行尾($)锚点：
-
-```Cpp
-class AnchorAst : public Ast {
-public:
-    enum Type { START, END };
-    
-private:
-    Type type;
-    
-public:
-    explicit AnchorAst(Type t) : type(t) {}
-    Type GetAnchorType() const { return type; }
-};
-```
-
 **当前实现的边界**
 
 Compiler 实现的 `Match` 是全字符串匹配，不是 Matcher 那样的子串搜索。它暂不支持字符类、Unicode 属性、重复次数和锚点，这些能力将在高级篇继续扩展。
 
-另外，当前 `src/regex.cc` 用 `DOT_CHAR` 作为 NFA 通配边的特殊标记，但 DFA 转移表仍按具体 code point 查找，两者尚未完整衔接。因此 `.` 的 NFA 语义虽然已经定义，当前 DFA 匹配路径仍需要修正并增加对应测试。
+`.` 在 NFA 中用 `DOT_CHAR` 表示。DFA 构造时，具体字符转移会合并同一状态集合中的通配边；匹配时，如果不存在精确转移，则回退到 `DOT_CHAR`。换行符 `\n` 和 `\r` 不执行这一回退，因此不会被 `.` 匹配。
+
+配套实现：[Ismantic/Regex](https://github.com/Ismantic/Regex)
