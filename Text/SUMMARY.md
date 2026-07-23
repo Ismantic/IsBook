@@ -6,7 +6,7 @@
 - [正则表达式引擎：高级篇](regex-engine-2.md)
 - [DoubleArray Trie](doublearray-trie.md)
 - [Critbit Trie](critbit-trie.md)
-- [中文分词：基础篇](iscut.md)
+- [中文分词：基础篇](dictcut.md)
 - [中文分词：高级篇](wapic.md)
 - [Tokenizer: SentencePiece](tokenizer-1.md)
 - [Tokenizer: BytePiece](tokenizer-2.md)
