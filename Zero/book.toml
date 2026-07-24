@@ -2,8 +2,8 @@
 authors = ["ismantic-dev"]
 language = "zh-CN"
 src = "."
-title = "底层实现：训练引擎"
-description = "从张量、自动微分到模型训练与 GPU 执行的训练引擎实现"
+title = "底层实现：训练框架"
+description = "从张量、自动微分到模型训练与 GPU 计算的训练框架实现"
 
 [build]
 build-dir = "../book-zero"
