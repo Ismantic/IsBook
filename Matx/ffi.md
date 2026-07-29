@@ -140,7 +140,7 @@ __mc_module_ctx         模块上下文
 
 **加载与查找**
 
-`runtime.ModuleLoader` 创建 `DefaultLibray`，使用 `dlopen(..., RTLD_NOW | RTLD_LOCAL)` 打开文件。随后 `LibraryModuleNode` 通过 `dlsym` 找到 `__mc_func_registry__`，读取函数名及其对应的 `BackendFunc`，建立模块自己的查找表。
+`runtime.ModuleLoader` 创建底层 `Library` 对象，使用 `dlopen(..., RTLD_NOW | RTLD_LOCAL)` 打开文件。随后 `LibraryModuleNode` 通过 `dlsym` 找到 `__mc_func_registry__`，读取函数名及其对应的 `BackendFunc`，建立模块自己的查找表。
 
 Python 的 `Module.get_function(name)` 调用 C API `GetBackendFunction`。找到函数后，`WrapFunction` 将 `BackendFunc` 重新包装成核心运行时使用的：
 

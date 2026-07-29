@@ -107,6 +107,23 @@ Python 的执行边界 → C API / 动态模块
 
 这里的“实现 Python”不是复刻 CPython，也不意味着兼容完整的 Python 语言。Matx 选择一个受限子集，重新实现支撑它所必需的语言结构和运行时，再用 C++ 代码生成代替字节码虚拟机完成执行。两条主线最终汇合为同一个问题：要把 Python 编译成 C++，究竟需要自己实现多少 Python？
 
+**不同层次**
+
+这条链路中有几组名称相近但职责不同的结构。先区分它们，可以避免把编译器自身的数据与生成程序运行时的数据混在一起：
+
+| 结构 | 所属阶段 | 作用 |
+| --- | --- | --- |
+| Python AST | Frontend 输入 | 表示 Python 原始语法 |
+| Matx AST | 编译器内部 | 表示类型与执行关系已经明确的程序 |
+| `Array<T>`、`Map<K, V>` | 编译器内部 | 组织参数、语句和函数等 AST 数据 |
+| `List`、`Dict`、`Set` | 生成程序运行期 | 保留 Python 容器的动态值语义 |
+| `DataType` | 编译期 | 描述表达式和变量的标量类型 |
+| `TypeIndex` | 运行期 | 识别 `Value` 中的实际值或对象 |
+| `FunctionRegistry` | 核心 Runtime | 让 Python Frontend 调用 C++ 编译器能力 |
+| 模块函数表 | 动态模块 | 让 Runtime 找到生成的本地函数 |
+
+这些结构有时使用相似的名字，是因为它们在不同边界上解决同一类问题。例如 Function Registry 和模块函数表都根据名称查找函数，但前者服务于编译器核心，后者服务于编译产物；两者不能合并为同一张表。
+
 ## 实现
 
 下面沿着 `add` 的编译过程，观察输入程序如何穿过上述结构。这里的重点不是再次罗列文件，而是确定每个模块位于哪一层，以及前一层的输出如何成为后一层的输入。
@@ -167,7 +184,7 @@ Matx 将构造函数注册为带名字的全局函数：
 
 ```text
 ast.PrimVar
-ast.PrimAdd
+ast._OpAdd
 ast.ReturnStmt
 ast.PrimFunc
 ```
@@ -303,3 +320,17 @@ Python int
     ↓
 把本地结果重新交给 Python
 ```
+
+阅读后续章节时，可以用下面的源码位置建立对应关系：
+
+| 主题 | 主要实现 |
+| --- | --- |
+| Runtime | `src/object.h`、`runtime_value.h`、`datatype.h` |
+| Container | `src/array.h`、`map.h`、`container.h`、`iterator.h` |
+| Function | `src/registry.h`、`parameters.h` |
+| AST | `src/expression.h`、`statement.h`、`function.h` |
+| Visitor | `src/visitor.h`、`printer.h`、`rewriter.h` |
+| Python Frontend | `python/ffi_system/compiler.py`、`parser.py`、`scope_context.py` |
+| FFI | `src/c_api.h`、`runtime_module.h`、`case_ext.cc` |
+
+这些文件并不是彼此隔离的模块。`parser.py` 通过 Function Registry 创建 `expression.h` 中的节点，`rewriter.h` 遍历这些节点并引用 Runtime 接口，`runtime_module.h` 最后加载生成结果。表格用于定位代码，前面的关系图则用于理解它们为何连接。

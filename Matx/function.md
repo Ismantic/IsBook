@@ -156,28 +156,28 @@ C++ 中的类型错误也不能越过 C ABI 直接传播。C API 会捕获运行
 
 ## 示例
 
-以构造加法表达式为例，`ast.PrimAdd` 在 C++ 中接收两个 `PrimExpr`：
+以构造加法表达式为例，Python Frontend 的 `add()` 实际查找 `ast._OpAdd`。它在 C++ 中接收两个 `PrimExpr`：
 
 ```cpp
-REGISTER_GLOBAL("ast.PrimAdd")
+REGISTER_GLOBAL("ast._OpAdd")
     .SetBody([](PrimExpr a, PrimExpr b) {
         return PrimAdd(a, b);
     });
 ```
 
-Python 前端调用这个名字时，参数已经被转换成运行时对象。C API 将它们放入 `Parameters`，随后从注册表取得函数：
+这里保留了宏展开后的核心结构；源码通过 `REGISTER_MAKE_BINARY_OP` 完成同样的注册。Python 前端调用这个名字时，参数已经被转换成运行时对象。C API 将它们放入 `Parameters`，随后从注册表取得函数：
 
 ```cpp
-Function* fn = FunctionRegistry::Get("ast.PrimAdd");
+Function* fn = FunctionRegistry::Get("ast._OpAdd");
 McValue result = (*fn)(params);
 ```
 
 在 Python 一侧，这个函数并不会以手写绑定的形式出现。前端通过 `GetGlobal` 取得一个通用的可调用对象，调用时再把两个表达式对象交给相同的参数打包逻辑。包装器依次将两个 `Any` 恢复为 `PrimExpr`，调用 Lambda 构造 `PrimAddNode`，再把结果包装成 `McValue` 返回。整个过程可以表示为：
 
 ```text
-Python: PrimAdd(lhs, rhs)
+Python: add(lhs, rhs)
               ↓
-       GetGlobal("ast.PrimAdd")
+       GetGlobal("ast._OpAdd")
               ↓
        Parameters(lhs, rhs)
               ↓
@@ -190,6 +190,6 @@ Python: PrimAdd(lhs, rhs)
 
 这个例子中存在两次类型转换。第一次发生在 Python 与 C API 之间，将 Python 表达式对象转换为带类型索引的 `Value`；第二次发生在 `FunctionWrapper` 中，将动态的 `Any` 恢复为注册函数声明的 `PrimExpr`。返回路径按相反顺序执行。Runtime 负责保存值的类型与生命周期，Function 只负责按照目标签名检查和传递它们。
 
-注册表也让调用方向得以反转。Python 前端不必由 C++ 主动调用，而是在加载扩展后自行查找 `ast.PrimAdd`、`runtime.Tuple` 或 `rewriter.BuildFunctions`。后续增加新的构造函数时，只要遵循相同的命名和参数约定，Python 侧就能继续复用同一个调用器。
+注册表也让调用方向得以反转。Python 前端不必由 C++ 主动调用，而是在加载扩展后自行查找 `ast._OpAdd`、`runtime.Tuple` 或 `rewriter.BuildFunctions`。后续增加新的构造函数时，只要遵循相同的命名和参数约定，Python 侧就能继续复用同一个调用器。
 
 同一条调用链既适用于整数和字符串，也适用于容器与 AST 对象。函数注册表解决了“如何找到并调用一种能力”，而参数转换将 Runtime 的动态值重新带回 C++ 的强类型世界。下一篇将继续讨论这些函数最常构造和处理的对象：抽象语法树。
